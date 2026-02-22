@@ -74,8 +74,6 @@ def _search_page_sync(
     }
     response = fs.session.get(fs.api_url, params=params)
     data = response.json()
-    import json
-    log.info("FatSecret raw response for '%s': %s", query, json.dumps(data, ensure_ascii=False, indent=2))
     if "error" in data:
         log.warning("FatSecret API error: %s", data["error"])
         return []
@@ -189,92 +187,18 @@ def _find_gram_serving(servings: list[dict]) -> dict | None:
     return servings[0] if servings else None
 
 
-import re
-
-_NUTR_RE = re.compile(
-    r"Calories:\s*([\d.]+)\s*kcal.*?"
-    r"Fat:\s*([\d.]+)\s*g.*?"
-    r"Carbs:\s*([\d.]+)\s*g.*?"
-    r"Protein:\s*([\d.]+)\s*g",
-    re.IGNORECASE | re.DOTALL,
-)
-
-_NUTR_RU_RE = re.compile(
-    r"Кал:\s*([\d.]+)\s*ккал.*?"
-    r"Жир:\s*([\d.]+)\s*г.*?"
-    r"Углев:\s*([\d.]+)\s*г.*?"
-    r"Белк:\s*([\d.]+)\s*г",
-    re.IGNORECASE | re.DOTALL,
-)
-
-_SERVING_G_RE = re.compile(
-    r"(?:Per|На|В)\s+([\d.]+)\s*(?:g|г)",
-    re.IGNORECASE,
-)
-
-
-def _parse_nutrition_from_desc(desc: str) -> tuple[dict[str, float], float] | None:
-    """Parse KBJU from food_description (English or Russian).
-
-    Returns (nutrition_per_100g, serving_grams) or None if unparseable.
-    Nutrition is always normalized to per-100g.
-    """
-    if not desc:
-        return None
-    m = _NUTR_RE.search(desc)
-    if not m:
-        m = _NUTR_RU_RE.search(desc)
-    if not m:
-        return None
-
-    raw = {
-        "calories": float(m.group(1)),
-        "fat": float(m.group(2)),
-        "carbs": float(m.group(3)),
-        "protein": float(m.group(4)),
-    }
-
-    gm = _SERVING_G_RE.search(desc)
-    serving_g = float(gm.group(1)) if gm else 100.0
-
-    if serving_g > 0 and abs(serving_g - 100) > 0.5:
-        factor = 100.0 / serving_g
-        nutr = {k: v * factor for k, v in raw.items()}
-    else:
-        nutr = raw
-
-    return nutr, serving_g
-
-
-def _kbju_score(
-    fs: dict[str, float],
-    target: dict[str, float],
-) -> float:
-    """Weighted relative distance across all four KBJU values. Lower is better."""
-    weights = {"calories": 2.0, "protein": 1.0, "fat": 1.0, "carbs": 1.0}
-    score = 0.0
-    for key, w in weights.items():
-        t = target.get(key, 0)
-        f = fs.get(key, 0)
-        if t > 0:
-            score += w * abs(f - t) / t
-        elif f > 0:
-            score += w * f / 100
-    return score
-
-
-async def match_food_top(
+async def search_and_pick(
     search_queries: list[str],
     fallback_name: str,
-    target: dict[str, float],
-    top_n: int = 3,
+    gpt_per_100g: dict[str, float],
     session_token: tuple[str, str] | None = None,
 ) -> list[dict]:
-    """Search FatSecret with multiple queries in parallel, return top N matches by KBJU.
+    """Search FatSecret, then ask LLM to pick top-3 matches.
 
-    target: {"calories": ..., "protein": ..., "fat": ..., "carbs": ...} per 100g.
-    Each result dict has: food_id, food_name, cal_per_100g, description, nutrition, food_type, score.
+    Returns list of dicts with: food_id, food_name, nutrition (per 100g).
     """
+    from services import openai_svc
+
     queries = [q for q in search_queries if q]
     if not queries:
         queries = [fallback_name]
@@ -284,48 +208,16 @@ async def match_food_top(
     if not results:
         return []
 
-    for i, item in enumerate(results[:10]):
-        log.info(
-            "FatSecret result #%d: id=%s name='%s' type=%s desc='%.150s'",
-            i, item.get("food_id"), item.get("food_name"),
-            item.get("food_type"), item.get("food_description", ""),
-        )
-
-    scored: list[tuple[float, dict]] = []
-    seen_ids: set[str] = set()
-    skipped = 0
+    seen: set[str] = set()
+    unique: list[dict] = []
     for item in results:
         fid = item.get("food_id")
-        if fid in seen_ids:
-            continue
-        parsed = _parse_nutrition_from_desc(item.get("food_description", ""))
-        if parsed is None:
-            skipped += 1
-            if skipped <= 5:
-                log.info(
-                    "Skipped unparseable: %s | desc: %.150s",
-                    item.get("food_name", "?"),
-                    item.get("food_description", ""),
-                )
-            continue
-        nutr_per_100g, serving_g = parsed
-        score = _kbju_score(nutr_per_100g, target)
-        seen_ids.add(fid)
-        scored.append((score, {
-            "food_id": fid,
-            "food_name": item.get("food_name", fallback_name),
-            "cal_per_100g": nutr_per_100g["calories"],
-            "description": item.get("food_description", ""),
-            "nutrition": nutr_per_100g,
-            "serving_g": serving_g,
-            "food_type": item.get("food_type", ""),
-        }))
+        if fid not in seen:
+            seen.add(fid)
+            unique.append(item)
 
-    if skipped:
-        log.info("Skipped %d items with unparseable descriptions (of %d total)", skipped, len(results))
-    log.info("Scored %d items out of %d total results", len(scored), len(results))
-    scored.sort(key=lambda x: x[0])
-    return [entry for _, entry in scored[:top_n]]
+    log.info("Sending %d unique FatSecret results to LLM for '%s'", len(unique), fallback_name)
+    return await openai_svc.pick_best_matches(fallback_name, gpt_per_100g, unique)
 
 
 async def log_matched_food(

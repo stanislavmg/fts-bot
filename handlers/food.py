@@ -263,34 +263,23 @@ async def on_custom_query(message: Message, state: FSMContext) -> None:
 
     result = MealResult.model_validate(meal_data)
     item = result.items[idx]
-    target = _gpt_per_100(item)
+    gpt_100 = _gpt_per_100(item)
 
     tokens = data.get("fs_tokens")
     log.info("Custom search for '%s', query='%s'", item.name, query)
     candidates = []
     try:
-        candidates = await fatsecret_svc.match_food_top(
+        candidates = await fatsecret_svc.search_and_pick(
             search_queries=[query],
             fallback_name=item.name,
-            target=target,
-            top_n=6,
+            gpt_per_100g=gpt_100,
             session_token=tokens,
         )
     except Exception:
         log.exception("FatSecret custom search failed for %s", item.name)
     log.info("Found %d candidates for '%s' (custom)", len(candidates), item.name)
 
-    used = data.get("used_queries", {})
-    exclude_ids = set(used.get(str(idx), {}).get("seen_food_ids", []))
-    candidates = [c for c in candidates if c["food_id"] not in exclude_ids][:3]
-
-    item_used = used.get(str(idx), {"seen_food_ids": [], "queries": []})
-    for c in candidates:
-        if c["food_id"] not in item_used["seen_food_ids"]:
-            item_used["seen_food_ids"].append(c["food_id"])
-    item_used["queries"] = list(set(item_used.get("queries", []) + [query]))
-    used[str(idx)] = item_used
-    await state.update_data(current_candidates=candidates, used_queries=used)
+    await state.update_data(current_candidates=candidates)
 
     text = _format_pick_message(item, candidates, idx, len(result.items))
     kb = _pick_keyboard(len(candidates)) if candidates else InlineKeyboardMarkup(
@@ -366,44 +355,30 @@ async def _search_and_show_item(
     result = MealResult.model_validate(data["meal_result"])
     idx = data["current_item_idx"]
     item = result.items[idx]
-    used = data.get("used_queries", {})
 
     await callback.message.edit_text(
         f"<b>[{idx + 1}/{len(result.items)}] {item.name}</b>\n\nИщу в FatSecret...",
         parse_mode="HTML",
     )
 
-    target = _gpt_per_100(item)
+    gpt_100 = _gpt_per_100(item)
     log.info(
         "Searching FatSecret for '%s', queries=%s", item.name, item.search_queries
     )
     tokens = data.get("fs_tokens")
     candidates = []
     try:
-        candidates = await fatsecret_svc.match_food_top(
+        candidates = await fatsecret_svc.search_and_pick(
             search_queries=item.search_queries,
             fallback_name=item.name,
-            target=target,
-            top_n=6,
+            gpt_per_100g=gpt_100,
             session_token=tokens,
         )
     except Exception:
         log.exception("FatSecret search failed for %s", item.name)
     log.info("Found %d candidates for '%s'", len(candidates), item.name)
 
-    exclude_ids = set(used.get(str(idx), {}).get("seen_food_ids", []))
-    candidates = [c for c in candidates if c["food_id"] not in exclude_ids][:3]
-
-    item_used = used.get(str(idx), {"seen_food_ids": [], "queries": []})
-    for c in candidates:
-        if c["food_id"] not in item_used["seen_food_ids"]:
-            item_used["seen_food_ids"].append(c["food_id"])
-    item_used["queries"] = list(set(item_used.get("queries", []) + item.search_queries))
-    used[str(idx)] = item_used
-    await state.update_data(
-        current_candidates=candidates,
-        used_queries=used,
-    )
+    await state.update_data(current_candidates=candidates)
 
     text = _format_pick_message(item, candidates, idx, len(result.items))
     kb = _pick_keyboard(len(candidates)) if candidates else InlineKeyboardMarkup(
@@ -438,7 +413,6 @@ async def on_meal_type(callback: CallbackQuery, state: FSMContext) -> None:
         fs_tokens=tokens,
         current_item_idx=0,
         item_selections=[None] * len(result.items),
-        used_queries={},
     )
     await state.set_state(FoodStates.picking_fs_items)
     await _search_and_show_item(callback, state)
