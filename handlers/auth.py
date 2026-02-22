@@ -40,15 +40,12 @@ async def cmd_auth(message: Message, state: FSMContext) -> None:
         return
 
     try:
-        token, secret = await fatsecret_svc.get_request_token()
+        auth_url = await fatsecret_svc.start_auth(message.from_user.id)
     except Exception:
-        log.exception("Failed to get FatSecret request token")
+        log.exception("Failed to get FatSecret auth URL")
         await message.answer("Ошибка при подключении к FatSecret. Попробуй позже.")
         return
 
-    await db.save_request_tokens(message.from_user.id, token, secret)
-
-    auth_url = fatsecret_svc.get_authorize_url(token)
     await message.answer(
         "Перейди по ссылке и авторизуйся в FatSecret:\n"
         f"{auth_url}\n\n"
@@ -60,17 +57,15 @@ async def cmd_auth(message: Message, state: FSMContext) -> None:
 @router.message(AuthStates.waiting_for_pin, F.text)
 async def process_pin(message: Message, state: FSMContext) -> None:
     pin = message.text.strip()
-    tokens = await db.get_request_tokens(message.from_user.id)
-    if not tokens:
+
+    try:
+        session_token = await fatsecret_svc.complete_auth(
+            message.from_user.id, pin
+        )
+    except ValueError:
         await message.answer("Сессия авторизации истекла. Отправь /auth ещё раз.")
         await state.clear()
         return
-
-    request_token, request_secret = tokens
-    try:
-        access_token, access_secret = await fatsecret_svc.get_access_token(
-            request_token, request_secret, pin
-        )
     except Exception:
         log.exception("Failed to exchange FatSecret tokens")
         await message.answer(
@@ -79,7 +74,9 @@ async def process_pin(message: Message, state: FSMContext) -> None:
         await state.clear()
         return
 
-    await db.save_access_tokens(message.from_user.id, access_token, access_secret)
+    await db.save_access_tokens(
+        message.from_user.id, session_token[0], session_token[1]
+    )
     await state.clear()
     await message.answer(
         "Авторизация прошла успешно!\n"

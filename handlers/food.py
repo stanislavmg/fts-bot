@@ -210,7 +210,7 @@ async def on_meal_type(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         return
 
-    access_token, access_secret = tokens
+    session_token = tokens
     await callback.answer("Сохраняю в FatSecret...")
     await callback.message.edit_text(
         _format_kbju(result) + "\n\nСохраняю в дневник FatSecret...",
@@ -221,7 +221,7 @@ async def on_meal_type(callback: CallbackQuery, state: FSMContext) -> None:
     for item in result.items:
         try:
             await fatsecret_svc.log_food_item(
-                access_token, access_secret,
+                session_token,
                 name=item.name,
                 weight_g=item.weight_g,
                 meal=meal_type,
