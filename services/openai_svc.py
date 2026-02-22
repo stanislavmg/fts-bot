@@ -51,7 +51,7 @@ SYSTEM_PROMPT = """\
   "items": [
     {
       "name": "Название продукта",
-      "search_name": "product name in English",
+      "search_queries": ["query1", "query2", "query3"],
       "weight_g": 200,
       "calories": 330,
       "protein": 62,
@@ -67,7 +67,11 @@ SYSTEM_PROMPT = """\
 
 Totals — это сумма по всем items. Все числовые значения — float.
 name — название на русском языке.
-search_name — название на английском для поиска в базе данных (например: "lentils", "cheddar cheese", "butter").\
+search_queries — ровно 3 варианта названия на английском для поиска в базе данных продуктов. От конкретного к общему.
+Примеры:
+- Сывороточный протеин: ["whey protein isolate", "whey protein powder", "protein powder"]
+- Гречка варёная: ["buckwheat cooked", "buckwheat groats boiled", "buckwheat"]
+- Сыр чеддер: ["cheddar cheese", "cheddar", "hard cheese"]\
 """
 
 

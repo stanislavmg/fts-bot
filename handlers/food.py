@@ -74,7 +74,13 @@ def _format_matches(matches: list[dict], result: MealResult) -> str:
                 "carbs": item.carbs / w * 100,
             }
             pct = _match_percent(nutr, gpt)
-            header = f'{i}. <b>{item.name}</b> ({item.weight_g:.0f}г) → {m["food_name"]}  ({pct}%)'
+            if pct >= 80:
+                badge = f"{pct}%"
+            elif pct >= 60:
+                badge = f"\u26a0\ufe0f {pct}%"
+            else:
+                badge = f"\u274c {pct}%"
+            header = f'{i}. <b>{item.name}</b> ({item.weight_g:.0f}г) → {m["food_name"]}  {badge}'
             table = (
                 f"<pre>"
                 f"  на 100г  Ккал   Б     Ж     У\n"
@@ -82,6 +88,8 @@ def _format_matches(matches: list[dict], result: MealResult) -> str:
                 f"  GPT:    {gpt['calories']:>5.0f} {gpt['protein']:>5.1f} {gpt['fat']:>5.1f} {gpt['carbs']:>5.1f}"
                 f"</pre>"
             )
+            if pct < 70:
+                table += "\n   <i>\u26a0\ufe0f КБЖУ в дневнике может отличаться</i>"
             lines.append(f"{header}\n{table}")
         else:
             lines.append(f'{i}. <b>{item.name}</b> → {m["food_name"]}')
@@ -280,7 +288,7 @@ async def on_meal_type(callback: CallbackQuery, state: FSMContext) -> None:
         }
         try:
             m = await fatsecret_svc.match_food(
-                search_name=item.search_name,
+                search_queries=item.search_queries,
                 fallback_name=item.name,
                 target=target_per_100,
             )

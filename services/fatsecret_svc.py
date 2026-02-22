@@ -73,13 +73,20 @@ async def search_food(query: str, page: int = 0, max_results: int = 50) -> list[
     return results
 
 
-async def search_food_extended(query: str) -> list[dict]:
-    """Fetch up to 100 results (2 pages x 50) for better matching."""
-    page0 = await search_food(query, page=0, max_results=50)
-    if len(page0) < 50:
-        return page0
-    page1 = await search_food(query, page=1, max_results=50)
-    return page0 + page1
+async def search_food_multi(queries: list[str]) -> list[dict]:
+    """Search multiple queries in parallel (50 results each), deduplicate by food_id."""
+    tasks = [search_food(q, page=0, max_results=50) for q in queries]
+    all_results = await asyncio.gather(*tasks)
+
+    seen: set[str] = set()
+    combined: list[dict] = []
+    for results in all_results:
+        for item in results:
+            fid = item.get("food_id")
+            if fid not in seen:
+                seen.add(fid)
+                combined.append(item)
+    return combined
 
 
 async def get_food(session_token: tuple[str, str], food_id: str) -> dict:
@@ -185,19 +192,19 @@ def _kbju_score(
 
 
 async def match_food(
-    search_name: str,
+    search_queries: list[str],
     fallback_name: str,
     target: dict[str, float],
 ) -> dict | None:
-    """Search FatSecret (up to 100 results), return the best match by KBJU proximity.
+    """Search FatSecret with multiple queries in parallel, return best KBJU match.
 
     target: {"calories": ..., "protein": ..., "fat": ..., "carbs": ...} per 100g.
     Returns dict with keys: food_id, food_name, cal_per_100g, description, nutrition, food_type.
     """
-    query = search_name or fallback_name
-    results = await search_food_extended(query)
-    if not results and search_name:
-        results = await search_food_extended(fallback_name)
+    queries = [q for q in search_queries if q] or [fallback_name]
+    results = await search_food_multi(queries)
+    if not results and fallback_name not in queries:
+        results = await search_food(fallback_name)
     if not results:
         return None
 
@@ -215,7 +222,7 @@ async def match_food(
             best_score = score
             best = {
                 "food_id": item["food_id"],
-                "food_name": item.get("food_name", query),
+                "food_name": item.get("food_name", fallback_name),
                 "cal_per_100g": nutr["calories"] if is_per_100g else None,
                 "description": item.get("food_description", ""),
                 "nutrition": nutr if is_per_100g else None,
@@ -225,7 +232,7 @@ async def match_food(
     if best is None and results:
         best = {
             "food_id": results[0]["food_id"],
-            "food_name": results[0].get("food_name", query),
+            "food_name": results[0].get("food_name", fallback_name),
             "cal_per_100g": None,
             "description": results[0].get("food_description", ""),
             "nutrition": None,

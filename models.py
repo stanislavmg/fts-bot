@@ -3,7 +3,7 @@ from pydantic import BaseModel
 
 class FoodItem(BaseModel):
     name: str
-    search_name: str = ""
+    search_queries: list[str] = []
     weight_g: float
     calories: float
     protein: float
