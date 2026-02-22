@@ -40,6 +40,9 @@ class AccessMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+RESTART_DELAY = 5
+
+
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -60,8 +63,16 @@ async def main() -> None:
     dp.include_router(food.router)
     dp.include_router(diary.router)
 
-    logging.info("Bot started, allowed users: %s", config.ALLOWED_USERS or "all")
-    await dp.start_polling(bot)
+    log.info("Bot started, allowed users: %s", config.ALLOWED_USERS or "all")
+    while True:
+        try:
+            await dp.start_polling(bot)
+        except Exception:
+            log.exception("Polling crashed, restarting in %ds...", RESTART_DELAY)
+            await asyncio.sleep(RESTART_DELAY)
+        else:
+            log.warning("Polling stopped gracefully, restarting in %ds...", RESTART_DELAY)
+            await asyncio.sleep(RESTART_DELAY)
 
 
 if __name__ == "__main__":
