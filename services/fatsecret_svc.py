@@ -74,6 +74,8 @@ def _search_page_sync(
     }
     response = fs.session.get(fs.api_url, params=params)
     data = response.json()
+    import json
+    log.info("FatSecret raw response for '%s': %s", query, json.dumps(data, ensure_ascii=False, indent=2))
     if "error" in data:
         log.warning("FatSecret API error: %s", data["error"])
         return []
