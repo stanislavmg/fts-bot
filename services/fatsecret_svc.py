@@ -205,11 +205,17 @@ _NUTR_RU_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+_SERVING_G_RE = re.compile(
+    r"(?:Per|На|В)\s+([\d.]+)\s*(?:g|г)",
+    re.IGNORECASE,
+)
 
-def _parse_nutrition_from_desc(desc: str) -> tuple[dict[str, float], bool] | None:
+
+def _parse_nutrition_from_desc(desc: str) -> tuple[dict[str, float], float] | None:
     """Parse KBJU from food_description (English or Russian).
 
-    Returns (nutrition_dict, is_per_100g) or None if unparseable.
+    Returns (nutrition_per_100g, serving_grams) or None if unparseable.
+    Nutrition is always normalized to per-100g.
     """
     if not desc:
         return None
@@ -218,25 +224,29 @@ def _parse_nutrition_from_desc(desc: str) -> tuple[dict[str, float], bool] | Non
         m = _NUTR_RU_RE.search(desc)
     if not m:
         return None
-    nutr = {
+
+    raw = {
         "calories": float(m.group(1)),
         "fat": float(m.group(2)),
         "carbs": float(m.group(3)),
         "protein": float(m.group(4)),
     }
-    dl = desc.lower()
-    is_per_100g = (
-        "per 100g" in dl or "per 100 g" in dl
-        or "на 100г" in dl or "на 100 г" in dl
-        or "в 100г" in dl or "в 100 г" in dl
-    )
-    return nutr, is_per_100g
+
+    gm = _SERVING_G_RE.search(desc)
+    serving_g = float(gm.group(1)) if gm else 100.0
+
+    if serving_g > 0 and abs(serving_g - 100) > 0.5:
+        factor = 100.0 / serving_g
+        nutr = {k: v * factor for k, v in raw.items()}
+    else:
+        nutr = raw
+
+    return nutr, serving_g
 
 
 def _kbju_score(
     fs: dict[str, float],
     target: dict[str, float],
-    is_per_100g: bool,
 ) -> float:
     """Weighted relative distance across all four KBJU values. Lower is better."""
     weights = {"calories": 2.0, "protein": 1.0, "fat": 1.0, "carbs": 1.0}
@@ -248,10 +258,6 @@ def _kbju_score(
             score += w * abs(f - t) / t
         elif f > 0:
             score += w * f / 100
-
-    if not is_per_100g:
-        score += 3.0
-
     return score
 
 
@@ -276,6 +282,13 @@ async def match_food_top(
     if not results:
         return []
 
+    for i, item in enumerate(results[:10]):
+        log.info(
+            "FatSecret result #%d: id=%s name='%s' type=%s desc='%.150s'",
+            i, item.get("food_id"), item.get("food_name"),
+            item.get("food_type"), item.get("food_description", ""),
+        )
+
     scored: list[tuple[float, dict]] = []
     seen_ids: set[str] = set()
     skipped = 0
@@ -288,25 +301,27 @@ async def match_food_top(
             skipped += 1
             if skipped <= 5:
                 log.info(
-                    "Skipped unparseable: %s | desc: %.120s",
+                    "Skipped unparseable: %s | desc: %.150s",
                     item.get("food_name", "?"),
                     item.get("food_description", ""),
                 )
             continue
-        nutr, is_per_100g = parsed
-        score = _kbju_score(nutr, target, is_per_100g)
+        nutr_per_100g, serving_g = parsed
+        score = _kbju_score(nutr_per_100g, target)
         seen_ids.add(fid)
         scored.append((score, {
             "food_id": fid,
             "food_name": item.get("food_name", fallback_name),
-            "cal_per_100g": nutr["calories"],
+            "cal_per_100g": nutr_per_100g["calories"],
             "description": item.get("food_description", ""),
-            "nutrition": nutr,
+            "nutrition": nutr_per_100g,
+            "serving_g": serving_g,
             "food_type": item.get("food_type", ""),
         }))
 
     if skipped:
         log.info("Skipped %d items with unparseable descriptions (of %d total)", skipped, len(results))
+    log.info("Scored %d items out of %d total results", len(scored), len(results))
     scored.sort(key=lambda x: x[0])
     return [entry for _, entry in scored[:top_n]]
 
