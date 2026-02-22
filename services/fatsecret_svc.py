@@ -56,20 +56,30 @@ async def complete_auth(telegram_id: int, pin: str) -> tuple[str, str]:
 
 # ── Food search & diary ──────────────────────────────────────────
 
-async def search_food(query: str) -> list[dict]:
+async def search_food(query: str, page: int = 0, max_results: int = 50) -> list[dict]:
     fs = Fatsecret(config.FS_CONSUMER_KEY, config.FS_CONSUMER_SECRET)
     try:
         results = await asyncio.get_running_loop().run_in_executor(
-            None, partial(fs.foods_search, query)
+            None,
+            partial(fs.foods_search, query, page_number=page, max_results=max_results),
         )
     except (KeyError, TypeError):
-        log.warning("FatSecret search returned no results for: %s", query)
+        log.warning("FatSecret search returned no results for: %s (page %d)", query, page)
         return []
     if results is None:
         return []
     if isinstance(results, dict):
         return [results]
     return results
+
+
+async def search_food_extended(query: str) -> list[dict]:
+    """Fetch up to 100 results (2 pages x 50) for better matching."""
+    page0 = await search_food(query, page=0, max_results=50)
+    if len(page0) < 50:
+        return page0
+    page1 = await search_food(query, page=1, max_results=50)
+    return page0 + page1
 
 
 async def get_food(session_token: tuple[str, str], food_id: str) -> dict:
@@ -116,28 +126,44 @@ def _find_gram_serving(servings: list[dict]) -> dict | None:
     return servings[0] if servings else None
 
 
-def _parse_nutrition_from_desc(desc: str) -> dict[str, float] | None:
-    """Parse KBJU from food_description like 'Per 100g - Calories: 116kcal | Fat: 0.38g | Carbs: 20.13g | Protein: 9.02g'."""
+import re
+
+_NUTR_RE = re.compile(
+    r"Calories:\s*([\d.]+)\s*kcal.*?"
+    r"Fat:\s*([\d.]+)\s*g.*?"
+    r"Carbs:\s*([\d.]+)\s*g.*?"
+    r"Protein:\s*([\d.]+)\s*g",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _parse_nutrition_from_desc(desc: str) -> tuple[dict[str, float], bool] | None:
+    """Parse KBJU from food_description.
+
+    Returns (nutrition_dict, is_per_100g) or None if unparseable.
+    Generic: 'Per 100g - Calories: 116kcal | ...' → is_per_100g=True
+    Brand:   'Per 1 serving - Calories: 300kcal | ...' → is_per_100g=False
+    """
     if not desc:
         return None
-    import re
-    cal = re.search(r"Calories:\s*([\d.]+)\s*kcal", desc, re.IGNORECASE)
-    fat = re.search(r"Fat:\s*([\d.]+)\s*g", desc, re.IGNORECASE)
-    carbs = re.search(r"Carbs:\s*([\d.]+)\s*g", desc, re.IGNORECASE)
-    prot = re.search(r"Protein:\s*([\d.]+)\s*g", desc, re.IGNORECASE)
-    if not cal:
+    m = _NUTR_RE.search(desc)
+    if not m:
         return None
-    return {
-        "calories": float(cal.group(1)),
-        "fat": float(fat.group(1)) if fat else 0,
-        "carbs": float(carbs.group(1)) if carbs else 0,
-        "protein": float(prot.group(1)) if prot else 0,
+    nutr = {
+        "calories": float(m.group(1)),
+        "fat": float(m.group(2)),
+        "carbs": float(m.group(3)),
+        "protein": float(m.group(4)),
     }
+    is_per_100g = "per 100g" in desc.lower() or "per 100 g" in desc.lower()
+    return nutr, is_per_100g
 
 
 def _kbju_score(
     fs: dict[str, float],
     target: dict[str, float],
+    is_per_100g: bool,
+    is_generic: bool,
 ) -> float:
     """Weighted relative distance across all four KBJU values. Lower is better."""
     weights = {"calories": 2.0, "protein": 1.0, "fat": 1.0, "carbs": 1.0}
@@ -149,6 +175,12 @@ def _kbju_score(
             score += w * abs(f - t) / t
         elif f > 0:
             score += w * f / 100
+
+    if not is_per_100g:
+        score += 5.0
+    if not is_generic:
+        score += 1.0
+
     return score
 
 
@@ -157,33 +189,37 @@ async def match_food(
     fallback_name: str,
     target: dict[str, float],
 ) -> dict | None:
-    """Search FatSecret, return the best match by KBJU proximity.
+    """Search FatSecret (up to 100 results), return the best match by KBJU proximity.
 
     target: {"calories": ..., "protein": ..., "fat": ..., "carbs": ...} per 100g.
-    Returns dict with keys: food_id, food_name, cal_per_100g, description, nutrition.
+    Returns dict with keys: food_id, food_name, cal_per_100g, description, nutrition, food_type.
     """
     query = search_name or fallback_name
-    results = await search_food(query)
+    results = await search_food_extended(query)
     if not results and search_name:
-        results = await search_food(fallback_name)
+        results = await search_food_extended(fallback_name)
     if not results:
         return None
 
     best = None
     best_score = float("inf")
     for item in results:
-        nutr = _parse_nutrition_from_desc(item.get("food_description", ""))
-        if nutr is None:
+        parsed = _parse_nutrition_from_desc(item.get("food_description", ""))
+        if parsed is None:
             continue
-        score = _kbju_score(nutr, target)
+        nutr, is_per_100g = parsed
+        is_generic = item.get("food_type", "").lower() == "generic"
+        score = _kbju_score(nutr, target, is_per_100g, is_generic)
+
         if score < best_score:
             best_score = score
             best = {
                 "food_id": item["food_id"],
                 "food_name": item.get("food_name", query),
-                "cal_per_100g": nutr["calories"],
+                "cal_per_100g": nutr["calories"] if is_per_100g else None,
                 "description": item.get("food_description", ""),
-                "nutrition": nutr,
+                "nutrition": nutr if is_per_100g else None,
+                "food_type": item.get("food_type", ""),
             }
 
     if best is None and results:
@@ -193,6 +229,7 @@ async def match_food(
             "cal_per_100g": None,
             "description": results[0].get("food_description", ""),
             "nutrition": None,
+            "food_type": results[0].get("food_type", ""),
         }
 
     return best
