@@ -265,6 +265,7 @@ async def on_custom_query(message: Message, state: FSMContext) -> None:
     item = result.items[idx]
     target = _gpt_per_100(item)
 
+    tokens = data.get("fs_tokens")
     log.info("Custom search for '%s', query='%s'", item.name, query)
     candidates = []
     try:
@@ -273,6 +274,7 @@ async def on_custom_query(message: Message, state: FSMContext) -> None:
             fallback_name=item.name,
             target=target,
             top_n=6,
+            session_token=tokens,
         )
     except Exception:
         log.exception("FatSecret custom search failed for %s", item.name)
@@ -375,6 +377,7 @@ async def _search_and_show_item(
     log.info(
         "Searching FatSecret for '%s', queries=%s", item.name, item.search_queries
     )
+    tokens = data.get("fs_tokens")
     candidates = []
     try:
         candidates = await fatsecret_svc.match_food_top(
@@ -382,6 +385,7 @@ async def _search_and_show_item(
             fallback_name=item.name,
             target=target,
             top_n=6,
+            session_token=tokens,
         )
     except Exception:
         log.exception("FatSecret search failed for %s", item.name)
@@ -431,6 +435,7 @@ async def on_meal_type(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer("Ищу продукты...")
     await state.update_data(
         meal_type=meal_type,
+        fs_tokens=tokens,
         current_item_idx=0,
         item_selections=[None] * len(result.items),
         used_queries={},

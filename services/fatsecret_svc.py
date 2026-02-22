@@ -56,8 +56,13 @@ async def complete_auth(telegram_id: int, pin: str) -> tuple[str, str]:
 
 # ── Food search & diary ──────────────────────────────────────────
 
-def _search_page_sync(query: str, page: int) -> list[dict]:
-    fs = Fatsecret(config.FS_CONSUMER_KEY, config.FS_CONSUMER_SECRET)
+def _search_page_sync(
+    query: str, page: int, session_token: tuple[str, str] | None = None
+) -> list[dict]:
+    if session_token:
+        fs = _get_client(session_token)
+    else:
+        fs = Fatsecret(config.FS_CONSUMER_KEY, config.FS_CONSUMER_SECRET)
     results = fs.foods_search(query, page_number=page)
     if results is None:
         return []
@@ -66,11 +71,15 @@ def _search_page_sync(query: str, page: int) -> list[dict]:
     return results
 
 
-async def search_food(query: str, pages: int = 3) -> list[dict]:
+async def search_food(
+    query: str, pages: int = 3, session_token: tuple[str, str] | None = None
+) -> list[dict]:
     """Fetch multiple pages (20 results each) in parallel for one query."""
     loop = asyncio.get_running_loop()
     tasks = [
-        loop.run_in_executor(None, partial(_search_page_sync, query, p))
+        loop.run_in_executor(
+            None, partial(_search_page_sync, query, p, session_token)
+        )
         for p in range(pages)
     ]
     combined: list[dict] = []
@@ -92,7 +101,11 @@ def _clean_russian_query(name: str) -> str:
     return cleaned if cleaned else name
 
 
-async def search_food_multi(queries: list[str], fallback_name: str = "") -> list[dict]:
+async def search_food_multi(
+    queries: list[str],
+    fallback_name: str = "",
+    session_token: tuple[str, str] | None = None,
+) -> list[dict]:
     """Search multiple queries in parallel, deduplicate by food_id."""
     ru_query = ""
     if fallback_name:
@@ -100,9 +113,9 @@ async def search_food_multi(queries: list[str], fallback_name: str = "") -> list
         if cleaned not in queries:
             ru_query = cleaned
 
-    tasks = [search_food(q, pages=3) for q in queries]
+    tasks = [search_food(q, pages=3, session_token=session_token) for q in queries]
     if ru_query:
-        tasks.append(search_food(ru_query, pages=1))
+        tasks.append(search_food(ru_query, pages=1, session_token=session_token))
 
     all_queries = list(queries) + ([ru_query] if ru_query else [])
     all_results = await asyncio.gather(*tasks)
@@ -226,6 +239,7 @@ async def match_food_top(
     fallback_name: str,
     target: dict[str, float],
     top_n: int = 3,
+    session_token: tuple[str, str] | None = None,
 ) -> list[dict]:
     """Search FatSecret with multiple queries in parallel, return top N matches by KBJU.
 
@@ -235,7 +249,9 @@ async def match_food_top(
     queries = [q for q in search_queries if q]
     if not queries:
         queries = [fallback_name]
-    results = await search_food_multi(queries, fallback_name=fallback_name)
+    results = await search_food_multi(
+        queries, fallback_name=fallback_name, session_token=session_token
+    )
     if not results:
         return []
 
