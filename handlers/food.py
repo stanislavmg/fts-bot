@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -101,11 +103,59 @@ async def _ensure_authorized(message: Message) -> bool:
     return True
 
 
-@router.message(F.voice)
-async def handle_voice(message: Message) -> None:
-    await message.answer(
-        "Голосовые сообщения пока не поддерживаются. Отправь текстом."
+async def _process_food_text(
+    text: str, message: Message, state: FSMContext, wait_msg: Message
+) -> None:
+    """Common logic: send text to LLM, show KBJU result."""
+    try:
+        result = await openai_svc.calculate_kbju(text)
+    except Exception:
+        log.exception("GPT KBJU calculation failed")
+        await wait_msg.edit_text("Ошибка при расчёте КБЖУ. Попробуй ещё раз.")
+        return
+
+    await state.update_data(
+        original_text=text,
+        meal_result=result.model_dump(),
     )
+    await wait_msg.edit_text(
+        _format_kbju(result),
+        reply_markup=CONFIRM_KB,
+        parse_mode="HTML",
+    )
+
+
+@router.message(F.voice)
+async def handle_voice(message: Message, state: FSMContext, bot: Bot) -> None:
+    current_state = await state.get_state()
+    if current_state is not None:
+        return
+
+    if not await _ensure_authorized(message):
+        return
+
+    wait_msg = await message.answer("Распознаю голосовое...")
+
+    tmp_path = None
+    try:
+        file = await bot.get_file(message.voice.file_id)
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".oga")
+        os.close(tmp_fd)
+        await bot.download_file(file.file_path, tmp_path)
+
+        text = await openai_svc.transcribe_voice(tmp_path)
+    except Exception:
+        log.exception("Voice transcription failed")
+        await wait_msg.edit_text(
+            "Не удалось распознать голосовое. Попробуй ещё раз или отправь текстом."
+        )
+        return
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    await wait_msg.edit_text(f"Распознано: <i>{text}</i>\n\nСчитаю КБЖУ...")
+    await _process_food_text(text, message, state, wait_msg)
 
 
 @router.message(F.text, ~F.text.startswith("/"))
@@ -118,23 +168,7 @@ async def handle_text(message: Message, state: FSMContext) -> None:
         return
 
     wait_msg = await message.answer("Считаю КБЖУ...")
-
-    try:
-        result = await openai_svc.calculate_kbju(message.text)
-    except Exception:
-        log.exception("GPT KBJU calculation failed")
-        await wait_msg.edit_text("Ошибка при расчёте КБЖУ. Попробуй ещё раз.")
-        return
-
-    await state.update_data(
-        original_text=message.text,
-        meal_result=result.model_dump(),
-    )
-    await wait_msg.edit_text(
-        _format_kbju(result),
-        reply_markup=CONFIRM_KB,
-        parse_mode="HTML",
-    )
+    await _process_food_text(message.text, message, state, wait_msg)
 
 
 @router.callback_query(F.data == "meal_retry")

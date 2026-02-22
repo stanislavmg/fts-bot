@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 
 from openai import AsyncOpenAI
 
@@ -12,6 +13,7 @@ from models import MealResult
 log = logging.getLogger(__name__)
 
 _client: AsyncOpenAI | None = None
+_groq_client: AsyncOpenAI | None = None
 
 
 def _get_client() -> AsyncOpenAI:
@@ -24,6 +26,18 @@ def _get_client() -> AsyncOpenAI:
             timeout=30.0,
         )
     return _client
+
+
+def _get_groq_client() -> AsyncOpenAI:
+    global _groq_client
+    if _groq_client is None:
+        _groq_client = AsyncOpenAI(
+            api_key=config.GROQ_API_KEY,
+            base_url="https://api.groq.com/openai/v1",
+            max_retries=1,
+            timeout=60.0,
+        )
+    return _groq_client
 
 
 SYSTEM_PROMPT = """\
@@ -84,3 +98,19 @@ async def calculate_kbju(text: str) -> MealResult:
         raise ValueError("LLM returned empty content")
     data = _extract_json(raw)
     return MealResult.model_validate(data)
+
+
+async def transcribe_voice(file_path: str | Path) -> str:
+    """Transcribe an audio file using Groq Whisper."""
+    client = _get_groq_client()
+    with open(file_path, "rb") as f:
+        response = await client.audio.transcriptions.create(
+            model="whisper-large-v3-turbo",
+            file=f,
+            language="ru",
+        )
+    text = response.text.strip()
+    log.info("Whisper transcription: %s", text[:200])
+    if not text:
+        raise ValueError("Whisper returned empty transcription")
+    return text

@@ -189,8 +189,7 @@ async def log_matched_food(
         return None
 
     serving_id = serving["serving_id"]
-    metric_amount = float(serving.get("metric_serving_amount", 100))
-    units = weight_g / metric_amount
+    units = weight_g
 
     return await create_food_entry(
         session_token,
