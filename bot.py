@@ -71,8 +71,8 @@ async def main() -> None:
             log.exception("Polling crashed, restarting in %ds...", RESTART_DELAY)
             await asyncio.sleep(RESTART_DELAY)
         else:
-            log.warning("Polling stopped gracefully, restarting in %ds...", RESTART_DELAY)
-            await asyncio.sleep(RESTART_DELAY)
+            log.info("Polling stopped gracefully, shutting down")
+            break
 
 
 if __name__ == "__main__":
