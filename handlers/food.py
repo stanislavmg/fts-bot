@@ -24,6 +24,7 @@ log = logging.getLogger(__name__)
 class FoodStates(StatesGroup):
     waiting_for_meal_choice = State()
     picking_fs_items = State()
+    waiting_custom_query = State()
     waiting_for_fs_confirm = State()
 
 
@@ -126,7 +127,7 @@ def _pick_keyboard(num_candidates: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             buttons_row,
             [
-                InlineKeyboardButton(text="\U0001f504 Искать ещё", callback_data="pick_retry"),
+                InlineKeyboardButton(text="\U0001f50d Свой запрос", callback_data="pick_custom"),
                 InlineKeyboardButton(text="\u23ed Пропустить", callback_data="pick_skip"),
             ],
         ]
@@ -243,6 +244,62 @@ async def handle_voice(message: Message, state: FSMContext, bot: Bot) -> None:
     await _process_food_text(text, message, state, wait_msg)
 
 
+@router.message(F.text, FoodStates.waiting_custom_query)
+async def on_custom_query(message: Message, state: FSMContext) -> None:
+    """User typed a custom search query for the current food item."""
+    query = message.text.strip()
+    if not query:
+        await message.answer("Пустой запрос. Попробуй ещё раз:")
+        return
+
+    data = await state.get_data()
+    idx = data["current_item_idx"]
+    meal_data = data["meal_result"]
+    meal_data["items"][idx]["search_queries"] = [query]
+    await state.update_data(meal_result=meal_data)
+    await state.set_state(FoodStates.picking_fs_items)
+
+    wait_msg = await message.answer("Ищу...")
+
+    result = MealResult.model_validate(meal_data)
+    item = result.items[idx]
+    target = _gpt_per_100(item)
+
+    log.info("Custom search for '%s', query='%s'", item.name, query)
+    candidates = []
+    try:
+        candidates = await fatsecret_svc.match_food_top(
+            search_queries=[query],
+            fallback_name=item.name,
+            target=target,
+            top_n=6,
+        )
+    except Exception:
+        log.exception("FatSecret custom search failed for %s", item.name)
+    log.info("Found %d candidates for '%s' (custom)", len(candidates), item.name)
+
+    used = data.get("used_queries", {})
+    exclude_ids = set(used.get(str(idx), {}).get("seen_food_ids", []))
+    candidates = [c for c in candidates if c["food_id"] not in exclude_ids][:3]
+
+    item_used = used.get(str(idx), {"seen_food_ids": [], "queries": []})
+    for c in candidates:
+        if c["food_id"] not in item_used["seen_food_ids"]:
+            item_used["seen_food_ids"].append(c["food_id"])
+    item_used["queries"] = list(set(item_used.get("queries", []) + [query]))
+    used[str(idx)] = item_used
+    await state.update_data(current_candidates=candidates, used_queries=used)
+
+    text = _format_pick_message(item, candidates, idx, len(result.items))
+    kb = _pick_keyboard(len(candidates)) if candidates else InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="\U0001f50d Свой запрос", callback_data="pick_custom"),
+            InlineKeyboardButton(text="\u23ed Пропустить", callback_data="pick_skip"),
+        ]]
+    )
+    await wait_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
 @router.message(F.text, ~F.text.startswith("/"))
 async def handle_text(message: Message, state: FSMContext) -> None:
     current_state = await state.get_state()
@@ -347,7 +404,7 @@ async def _search_and_show_item(
     text = _format_pick_message(item, candidates, idx, len(result.items))
     kb = _pick_keyboard(len(candidates)) if candidates else InlineKeyboardMarkup(
         inline_keyboard=[[
-            InlineKeyboardButton(text="\U0001f504 Искать ещё", callback_data="pick_retry"),
+            InlineKeyboardButton(text="\U0001f50d Свой запрос", callback_data="pick_custom"),
             InlineKeyboardButton(text="\u23ed Пропустить", callback_data="pick_skip"),
         ]]
     )
@@ -423,27 +480,15 @@ async def on_pick(callback: CallbackQuery, state: FSMContext) -> None:
         await _advance_to_next_item(callback, state)
         return
 
-    if action == "retry":
-        await callback.answer("Ищу другие варианты...")
+    if action == "custom":
+        await callback.answer()
         result = MealResult.model_validate(data["meal_result"])
         item = result.items[idx]
-
-        try:
-            new_queries = await openai_svc.get_more_search_queries(
-                item.name,
-                data.get("used_queries", {}).get(str(idx), {}).get("queries", []),
-            )
-        except Exception:
-            log.exception("Failed to get more queries for %s", item.name)
-            new_queries = []
-
-        if new_queries:
-            log.info("Retry search for '%s' with queries: %s", item.name, new_queries)
-            meal_data = data["meal_result"]
-            meal_data["items"][idx]["search_queries"] = new_queries
-            await state.update_data(meal_result=meal_data)
-
-        await _search_and_show_item(callback, state)
+        await state.set_state(FoodStates.waiting_custom_query)
+        await callback.message.answer(
+            f"Введи поисковый запрос для <b>{item.name}</b> (на английском лучше):",
+            parse_mode="HTML",
+        )
         return
 
     try:

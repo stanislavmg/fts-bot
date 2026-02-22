@@ -93,14 +93,18 @@ def _clean_russian_query(name: str) -> str:
 
 
 async def search_food_multi(queries: list[str], fallback_name: str = "") -> list[dict]:
-    """Search multiple queries in parallel (3 pages × 20 = up to 60 each), deduplicate."""
-    all_queries = list(queries)
+    """Search multiple queries in parallel, deduplicate by food_id."""
+    ru_query = ""
     if fallback_name:
         cleaned = _clean_russian_query(fallback_name)
-        if cleaned not in all_queries:
-            all_queries.append(cleaned)
+        if cleaned not in queries:
+            ru_query = cleaned
 
-    tasks = [search_food(q, pages=3) for q in all_queries]
+    tasks = [search_food(q, pages=3) for q in queries]
+    if ru_query:
+        tasks.append(search_food(ru_query, pages=1))
+
+    all_queries = list(queries) + ([ru_query] if ru_query else [])
     all_results = await asyncio.gather(*tasks)
 
     for q, results in zip(all_queries, all_results):
@@ -199,7 +203,6 @@ def _kbju_score(
     fs: dict[str, float],
     target: dict[str, float],
     is_per_100g: bool,
-    is_generic: bool,
 ) -> float:
     """Weighted relative distance across all four KBJU values. Lower is better."""
     weights = {"calories": 2.0, "protein": 1.0, "fat": 1.0, "carbs": 1.0}
@@ -213,9 +216,7 @@ def _kbju_score(
             score += w * f / 100
 
     if not is_per_100g:
-        score += 5.0
-    if not is_generic:
-        score += 1.0
+        score += 3.0
 
     return score
 
@@ -248,10 +249,7 @@ async def match_food_top(
         if parsed is None:
             continue
         nutr, is_per_100g = parsed
-        if not is_per_100g:
-            continue
-        is_generic = item.get("food_type", "").lower() == "generic"
-        score = _kbju_score(nutr, target, is_per_100g, is_generic)
+        score = _kbju_score(nutr, target, is_per_100g)
         seen_ids.add(fid)
         scored.append((score, {
             "food_id": fid,
