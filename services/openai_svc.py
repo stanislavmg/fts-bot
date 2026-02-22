@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
+import re
 
 from openai import AsyncOpenAI
 
@@ -17,7 +17,10 @@ _client: AsyncOpenAI | None = None
 def _get_client() -> AsyncOpenAI:
     global _client
     if _client is None:
-        _client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+        _client = AsyncOpenAI(
+            api_key=config.LLM_API_KEY,
+            base_url=config.LLM_BASE_URL,
+        )
     return _client
 
 
@@ -27,7 +30,7 @@ SYSTEM_PROMPT = """\
 Если вес не указан, оцени стандартную порцию и укажи её вес.
 Используй данные из общепринятых таблиц калорийности.
 
-Формат ответа (строго JSON, без markdown):
+Ответь ТОЛЬКО валидным JSON без markdown-обёртки, без ```json```, без пояснений:
 {
   "items": [
     {
@@ -49,64 +52,24 @@ Totals — это сумма по всем items. Все числовые зна
 Названия продуктов — на русском языке.\
 """
 
-MEAL_RESULT_SCHEMA = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "meal_result",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "items": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "weight_g": {"type": "number"},
-                            "calories": {"type": "number"},
-                            "protein": {"type": "number"},
-                            "fat": {"type": "number"},
-                            "carbs": {"type": "number"},
-                        },
-                        "required": ["name", "weight_g", "calories", "protein", "fat", "carbs"],
-                        "additionalProperties": False,
-                    },
-                },
-                "total_calories": {"type": "number"},
-                "total_protein": {"type": "number"},
-                "total_fat": {"type": "number"},
-                "total_carbs": {"type": "number"},
-            },
-            "required": ["items", "total_calories", "total_protein", "total_fat", "total_carbs"],
-            "additionalProperties": False,
-        },
-    },
-}
 
-
-async def transcribe_voice(file_path: Path) -> str:
-    client = _get_client()
-    with open(file_path, "rb") as f:
-        transcription = await client.audio.transcriptions.create(
-            model="whisper-1",
-            file=f,
-            language="ru",
-        )
-    return transcription.text
+def _extract_json(text: str) -> dict:
+    """Extract JSON from model response, stripping markdown fences if present."""
+    cleaned = re.sub(r"^```(?:json)?\s*", "", text.strip())
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    return json.loads(cleaned)
 
 
 async def calculate_kbju(text: str) -> MealResult:
     client = _get_client()
     response = await client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=config.LLM_MODEL,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": text},
         ],
-        response_format=MEAL_RESULT_SCHEMA,
         temperature=0.3,
     )
     raw = response.choices[0].message.content
-    data = json.loads(raw)
+    data = _extract_json(raw)
     return MealResult.model_validate(data)

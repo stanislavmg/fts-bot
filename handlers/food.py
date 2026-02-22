@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import logging
-import tempfile
-from pathlib import Path
 
 from aiogram import Router, F, Bot
 from aiogram.fsm.context import FSMContext
@@ -78,40 +76,8 @@ async def _ensure_authorized(message: Message) -> bool:
 
 
 @router.message(F.voice)
-async def handle_voice(message: Message, state: FSMContext, bot: Bot) -> None:
-    if not await _ensure_authorized(message):
-        return
-
-    wait_msg = await message.answer("Распознаю голос...")
-
-    file = await bot.get_file(message.voice.file_id)
-    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-    await bot.download_file(file.file_path, destination=tmp_path)
-
-    try:
-        text = await openai_svc.transcribe_voice(tmp_path)
-    finally:
-        tmp_path.unlink(missing_ok=True)
-
-    await wait_msg.edit_text(f"Распознано: <i>{text}</i>\n\nСчитаю КБЖУ...", parse_mode="HTML")
-
-    try:
-        result = await openai_svc.calculate_kbju(text)
-    except Exception:
-        log.exception("GPT KBJU calculation failed")
-        await wait_msg.edit_text("Ошибка при расчёте КБЖУ. Попробуй ещё раз.")
-        return
-
-    await state.update_data(
-        original_text=text,
-        meal_result=result.model_dump(),
-    )
-    await wait_msg.edit_text(
-        _format_kbju(result),
-        reply_markup=CONFIRM_KB,
-        parse_mode="HTML",
-    )
+async def handle_voice(message: Message) -> None:
+    await message.answer("Голосовые сообщения пока не поддерживаются. Отправь текстом.")
 
 
 @router.message(F.text, ~F.text.startswith("/"))
