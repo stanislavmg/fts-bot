@@ -121,76 +121,38 @@ async def transcribe_voice(file_path: str | Path) -> str:
     return text
 
 
-MATCH_PROMPT = """\
-Пользователь ищет продукт "{name}" в базе данных FatSecret.
-Ориентировочное КБЖУ на 100г (от первичной оценки):
-  Ккал: {cal}, Белки: {prot}г, Жиры: {fat}г, Углеводы: {carbs}г
+RETRY_SEARCH_PROMPT = """\
+Пользователь ищет продукт "{name}" в базе данных еды.
+Предыдущие поисковые запросы не дали хорошего результата: {tried}
 
-Ниже список найденных позиций из базы (food_id, название, описание с КБЖУ порции).
-Выбери 3 наиболее подходящих по смыслу и КБЖУ. Для каждого пересчитай КБЖУ на 100 грамм.
+Придумай 3 новых поисковых запроса на английском языке, которые могут найти этот продукт.
+Используй синонимы, альтернативные названия, более общие или более конкретные формулировки.
 
-Ответь ТОЛЬКО валидным JSON-массивом без markdown-обёртки, без пояснений:
-[
-  {{"food_id": "12345", "food_name": "Название", "calories": 377.0, "protein": 83.0, "fat": 3.3, "carbs": 6.7}},
-  ...
-]
-
-Все числа — float, КБЖУ строго на 100г. Если подходящих меньше 3, верни сколько есть.
-Позиции из базы:\n{items}\
+Ответь ТОЛЬКО JSON-массивом строк, без пояснений:
+["query1", "query2", "query3"]\
 """
 
 
-async def pick_best_matches(
-    item_name: str,
-    gpt_per_100g: dict[str, float],
-    fs_results: list[dict],
-) -> list[dict]:
-    """Ask LLM to pick top-3 matches from FatSecret search results."""
-    compact = "\n".join(
-        f"- food_id={r['food_id']} | {r.get('food_name', '?')} | {r.get('food_description', '')}"
-        for r in fs_results
-    )
-    prompt = MATCH_PROMPT.format(
-        name=item_name,
-        cal=gpt_per_100g.get("calories", 0),
-        prot=gpt_per_100g.get("protein", 0),
-        fat=gpt_per_100g.get("fat", 0),
-        carbs=gpt_per_100g.get("carbs", 0),
-        items=compact,
-    )
+async def get_more_search_queries(name: str, tried: list[str]) -> list[str]:
+    """Ask LLM for alternative search queries for a food product."""
     client = _get_client()
+    prompt = RETRY_SEARCH_PROMPT.format(name=name, tried=", ".join(tried) or "нет")
     response = await client.chat.completions.create(
         model=config.LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
-        timeout=30.0,
+        temperature=0.7,
+        timeout=15.0,
     )
     if not response.choices:
-        log.warning("LLM returned no choices for match picking")
+        log.warning("LLM returned no choices for retry queries")
         return []
     raw = response.choices[0].message.content
-    log.info("LLM match response for '%s': %s", item_name, raw[:500] if raw else "<None>")
+    log.info("LLM retry queries for '%s': %s", name, raw[:300] if raw else "<None>")
     if not raw:
         return []
-    try:
-        data = _extract_json(raw)
-    except (json.JSONDecodeError, ValueError):
-        log.exception("Failed to parse LLM match response")
-        return []
-    if not isinstance(data, list):
-        return []
-    results = []
-    for entry in data[:3]:
-        if not isinstance(entry, dict) or "food_id" not in entry:
-            continue
-        results.append({
-            "food_id": str(entry["food_id"]),
-            "food_name": entry.get("food_name", ""),
-            "nutrition": {
-                "calories": float(entry.get("calories", 0)),
-                "protein": float(entry.get("protein", 0)),
-                "fat": float(entry.get("fat", 0)),
-                "carbs": float(entry.get("carbs", 0)),
-            },
-        })
-    return results
+    data = _extract_json(raw)
+    if isinstance(data, list):
+        queries = [str(q) for q in data[:3]]
+        log.info("Parsed retry queries: %s", queries)
+        return queries
+    return []
