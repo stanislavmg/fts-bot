@@ -35,7 +35,7 @@ def _make_auth(
 
 def _get_request_token() -> tuple[str, str]:
     auth = _make_auth(callback_uri="oob")
-    resp = requests.post(config.FS_REQUEST_TOKEN_URL, auth=auth)
+    resp = requests.get(config.FS_REQUEST_TOKEN_URL, auth=auth)
     if resp.status_code != 200:
         raise ValueError(
             f"FatSecret request_token failed ({resp.status_code}): {resp.text}"
