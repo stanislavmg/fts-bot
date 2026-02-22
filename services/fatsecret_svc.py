@@ -63,35 +63,43 @@ def _search_page_sync(
         fs = _get_client(session_token)
     else:
         fs = Fatsecret(config.FS_CONSUMER_KEY, config.FS_CONSUMER_SECRET)
-    results = fs.foods_search(query, page_number=page)
-    if results is None:
+    params = {
+        "method": "foods.search",
+        "search_expression": query,
+        "page_number": str(page),
+        "max_results": "50",
+        "region": "RU",
+        "language": "ru",
+        "format": "json",
+    }
+    response = fs.session.get(fs.api_url, params=params)
+    data = response.json()
+    if "error" in data:
+        log.warning("FatSecret API error: %s", data["error"])
         return []
-    if isinstance(results, dict):
-        return [results]
-    return results
+    foods = data.get("foods", {})
+    food_list = foods.get("food", [])
+    if food_list is None:
+        return []
+    if isinstance(food_list, dict):
+        return [food_list]
+    return food_list
 
 
 async def search_food(
-    query: str, pages: int = 3, session_token: tuple[str, str] | None = None
+    query: str, session_token: tuple[str, str] | None = None
 ) -> list[dict]:
-    """Fetch multiple pages (20 results each) in parallel for one query."""
-    loop = asyncio.get_running_loop()
-    tasks = [
-        loop.run_in_executor(
-            None, partial(_search_page_sync, query, p, session_token)
+    """Search FatSecret for a query (up to 50 results, region=RU)."""
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            None, partial(_search_page_sync, query, 0, session_token)
         )
-        for p in range(pages)
-    ]
-    combined: list[dict] = []
-    for coro in asyncio.as_completed(tasks):
-        try:
-            page_items = await coro
-            combined.extend(page_items)
-        except (KeyError, TypeError):
-            pass
-        except Exception:
-            log.exception("FatSecret search failed for: %s", query)
-    return combined
+    except (KeyError, TypeError):
+        log.warning("FatSecret search returned no results for: %s", query)
+        return []
+    except Exception:
+        log.exception("FatSecret search failed for: %s", query)
+        return []
 
 
 def _clean_russian_query(name: str) -> str:
@@ -113,9 +121,9 @@ async def search_food_multi(
         if cleaned not in queries:
             ru_query = cleaned
 
-    tasks = [search_food(q, pages=3, session_token=session_token) for q in queries]
+    tasks = [search_food(q, session_token=session_token) for q in queries]
     if ru_query:
-        tasks.append(search_food(ru_query, pages=1, session_token=session_token))
+        tasks.append(search_food(ru_query, session_token=session_token))
 
     all_queries = list(queries) + ([ru_query] if ru_query else [])
     all_results = await asyncio.gather(*tasks)
@@ -189,17 +197,25 @@ _NUTR_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+_NUTR_RU_RE = re.compile(
+    r"Кал:\s*([\d.]+)\s*ккал.*?"
+    r"Жир:\s*([\d.]+)\s*г.*?"
+    r"Углев:\s*([\d.]+)\s*г.*?"
+    r"Белк:\s*([\d.]+)\s*г",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def _parse_nutrition_from_desc(desc: str) -> tuple[dict[str, float], bool] | None:
-    """Parse KBJU from food_description.
+    """Parse KBJU from food_description (English or Russian).
 
     Returns (nutrition_dict, is_per_100g) or None if unparseable.
-    Generic: 'Per 100g - Calories: 116kcal | ...' → is_per_100g=True
-    Brand:   'Per 1 serving - Calories: 300kcal | ...' → is_per_100g=False
     """
     if not desc:
         return None
     m = _NUTR_RE.search(desc)
+    if not m:
+        m = _NUTR_RU_RE.search(desc)
     if not m:
         return None
     nutr = {
@@ -208,7 +224,12 @@ def _parse_nutrition_from_desc(desc: str) -> tuple[dict[str, float], bool] | Non
         "carbs": float(m.group(3)),
         "protein": float(m.group(4)),
     }
-    is_per_100g = "per 100g" in desc.lower() or "per 100 g" in desc.lower()
+    dl = desc.lower()
+    is_per_100g = (
+        "per 100g" in dl or "per 100 g" in dl
+        or "на 100г" in dl or "на 100 г" in dl
+        or "в 100г" in dl or "в 100 г" in dl
+    )
     return nutr, is_per_100g
 
 
@@ -257,12 +278,20 @@ async def match_food_top(
 
     scored: list[tuple[float, dict]] = []
     seen_ids: set[str] = set()
+    skipped = 0
     for item in results:
         fid = item.get("food_id")
         if fid in seen_ids:
             continue
         parsed = _parse_nutrition_from_desc(item.get("food_description", ""))
         if parsed is None:
+            skipped += 1
+            if skipped <= 5:
+                log.info(
+                    "Skipped unparseable: %s | desc: %.120s",
+                    item.get("food_name", "?"),
+                    item.get("food_description", ""),
+                )
             continue
         nutr, is_per_100g = parsed
         score = _kbju_score(nutr, target, is_per_100g)
@@ -276,6 +305,8 @@ async def match_food_top(
             "food_type": item.get("food_type", ""),
         }))
 
+    if skipped:
+        log.info("Skipped %d items with unparseable descriptions (of %d total)", skipped, len(results))
     scored.sort(key=lambda x: x[0])
     return [entry for _, entry in scored[:top_n]]
 
