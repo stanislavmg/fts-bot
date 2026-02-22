@@ -116,22 +116,68 @@ def _find_gram_serving(servings: list[dict]) -> dict | None:
     return servings[0] if servings else None
 
 
-async def log_food_item(
-    session_token: tuple[str, str],
-    name: str,
-    weight_g: float,
-    meal: str = "other",
-    search_name: str = "",
-) -> str | None:
-    """Search for a food, pick the best match, and create a diary entry."""
-    query = search_name or name
+def _parse_calories_from_desc(desc: str) -> float | None:
+    """Extract 'Per 100g' calories from food_description like 'Per 100g - Calories: 116kcal | ...'."""
+    if not desc:
+        return None
+    import re
+    m = re.search(r"Calories:\s*([\d.]+)\s*kcal", desc, re.IGNORECASE)
+    if m:
+        return float(m.group(1))
+    return None
+
+
+async def match_food(
+    search_name: str,
+    fallback_name: str,
+    target_cal_per_100g: float,
+) -> dict | None:
+    """Search FatSecret, return the best match by calories proximity.
+
+    Returns dict with keys: food_id, food_name, cal_per_100g, description.
+    """
+    query = search_name or fallback_name
     results = await search_food(query)
     if not results and search_name:
-        results = await search_food(name)
+        results = await search_food(fallback_name)
     if not results:
         return None
 
-    food_id = results[0]["food_id"]
+    best = None
+    best_diff = float("inf")
+    for item in results[:10]:
+        cal = _parse_calories_from_desc(item.get("food_description", ""))
+        if cal is None:
+            continue
+        diff = abs(cal - target_cal_per_100g)
+        if diff < best_diff:
+            best_diff = diff
+            best = {
+                "food_id": item["food_id"],
+                "food_name": item.get("food_name", query),
+                "cal_per_100g": cal,
+                "description": item.get("food_description", ""),
+            }
+
+    if best is None and results:
+        best = {
+            "food_id": results[0]["food_id"],
+            "food_name": results[0].get("food_name", query),
+            "cal_per_100g": None,
+            "description": results[0].get("food_description", ""),
+        }
+
+    return best
+
+
+async def log_matched_food(
+    session_token: tuple[str, str],
+    food_id: str,
+    entry_name: str,
+    weight_g: float,
+    meal: str = "other",
+) -> str | None:
+    """Create a diary entry for an already-matched food_id."""
     food_detail = await get_food(session_token, food_id)
 
     servings_raw = food_detail.get("servings", {}).get("serving", [])
@@ -149,7 +195,7 @@ async def log_food_item(
     return await create_food_entry(
         session_token,
         food_id=food_id,
-        food_entry_name=name,
+        food_entry_name=entry_name,
         serving_id=serving_id,
         number_of_units=units,
         meal=meal,
