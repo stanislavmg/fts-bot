@@ -49,13 +49,20 @@ def _format_matches(matches: list[dict], result: MealResult) -> str:
         if m is None:
             lines.append(f"{i}. {item.name} — <i>не найдено</i>")
             continue
-        fs_cal = m.get("cal_per_100g")
-        gpt_cal_100 = (item.calories / item.weight_g * 100) if item.weight_g else 0
-        cal_str = f"{fs_cal:.0f}" if fs_cal else "?"
-        lines.append(
-            f'{i}. <b>{item.name}</b> → {m["food_name"]}\n'
-            f"   FS: {cal_str} ккал/100г | GPT: {gpt_cal_100:.0f} ккал/100г"
-        )
+        nutr = m.get("nutrition")
+        w = item.weight_g if item.weight_g else 1
+        if nutr:
+            lines.append(
+                f'{i}. <b>{item.name}</b> → {m["food_name"]}\n'
+                f"   FS:  К:{nutr['calories']:.0f} Б:{nutr['protein']:.1f} "
+                f"Ж:{nutr['fat']:.1f} У:{nutr['carbs']:.1f} /100г\n"
+                f"   GPT: К:{item.calories / w * 100:.0f} Б:{item.protein / w * 100:.1f} "
+                f"Ж:{item.fat / w * 100:.1f} У:{item.carbs / w * 100:.1f} /100г"
+            )
+        else:
+            lines.append(
+                f'{i}. <b>{item.name}</b> → {m["food_name"]}'
+            )
     return "\n".join(lines)
 
 
@@ -242,12 +249,18 @@ async def on_meal_type(callback: CallbackQuery, state: FSMContext) -> None:
 
     matches: list[dict | None] = []
     for item in result.items:
-        cal_per_100 = (item.calories / item.weight_g * 100) if item.weight_g else 0
+        w = item.weight_g if item.weight_g else 1
+        target_per_100 = {
+            "calories": item.calories / w * 100,
+            "protein": item.protein / w * 100,
+            "fat": item.fat / w * 100,
+            "carbs": item.carbs / w * 100,
+        }
         try:
             m = await fatsecret_svc.match_food(
                 search_name=item.search_name,
                 fallback_name=item.name,
-                target_cal_per_100g=cal_per_100,
+                target=target_per_100,
             )
         except Exception:
             log.exception("FatSecret match failed for %s", item.name)
