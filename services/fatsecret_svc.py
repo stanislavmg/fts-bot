@@ -56,25 +56,33 @@ async def complete_auth(telegram_id: int, pin: str) -> tuple[str, str]:
 
 # ── Food search & diary ──────────────────────────────────────────
 
-async def search_food(query: str, page: int = 0, max_results: int = 50) -> list[dict]:
-    """Search FatSecret with foods_search (supports max_results up to 50)."""
+def _search_page_sync(query: str, page: int) -> list[dict]:
     fs = Fatsecret(config.FS_CONSUMER_KEY, config.FS_CONSUMER_SECRET)
-    try:
-        results = await asyncio.get_running_loop().run_in_executor(
-            None,
-            partial(fs.foods_search, query, page_number=page, max_results=max_results),
-        )
-    except (KeyError, TypeError):
-        log.warning("FatSecret search returned no results for: %s (page %d)", query, page)
-        return []
-    except Exception:
-        log.exception("FatSecret search failed for: %s (page %d)", query, page)
-        return []
+    results = fs.foods_search(query, page_number=page)
     if results is None:
         return []
     if isinstance(results, dict):
         return [results]
     return results
+
+
+async def search_food(query: str, pages: int = 3) -> list[dict]:
+    """Fetch multiple pages (20 results each) in parallel for one query."""
+    loop = asyncio.get_running_loop()
+    tasks = [
+        loop.run_in_executor(None, partial(_search_page_sync, query, p))
+        for p in range(pages)
+    ]
+    combined: list[dict] = []
+    for coro in asyncio.as_completed(tasks):
+        try:
+            page_items = await coro
+            combined.extend(page_items)
+        except (KeyError, TypeError):
+            pass
+        except Exception:
+            log.exception("FatSecret search failed for: %s", query)
+    return combined
 
 
 def _clean_russian_query(name: str) -> str:
@@ -85,14 +93,14 @@ def _clean_russian_query(name: str) -> str:
 
 
 async def search_food_multi(queries: list[str], fallback_name: str = "") -> list[dict]:
-    """Search multiple queries in parallel (up to 50 each), deduplicate."""
+    """Search multiple queries in parallel (3 pages × 20 = up to 60 each), deduplicate."""
     all_queries = list(queries)
     if fallback_name:
         cleaned = _clean_russian_query(fallback_name)
         if cleaned not in all_queries:
             all_queries.append(cleaned)
 
-    tasks = [search_food(q, page=0, max_results=50) for q in all_queries]
+    tasks = [search_food(q, pages=3) for q in all_queries]
     all_results = await asyncio.gather(*tasks)
 
     for q, results in zip(all_queries, all_results):
