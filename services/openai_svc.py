@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+from functools import partial
 from pathlib import Path
 
 from openai import AsyncOpenAI
@@ -13,7 +15,7 @@ from models import MealResult
 log = logging.getLogger(__name__)
 
 _client: AsyncOpenAI | None = None
-_groq_client: AsyncOpenAI | None = None
+_whisper_model = None
 
 
 def _get_client() -> AsyncOpenAI:
@@ -28,16 +30,14 @@ def _get_client() -> AsyncOpenAI:
     return _client
 
 
-def _get_groq_client() -> AsyncOpenAI:
-    global _groq_client
-    if _groq_client is None:
-        _groq_client = AsyncOpenAI(
-            api_key=config.GROQ_API_KEY,
-            base_url="https://api.groq.com/openai/v1",
-            max_retries=1,
-            timeout=60.0,
-        )
-    return _groq_client
+def _get_whisper():
+    global _whisper_model
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel
+        log.info("Loading Whisper model (base)...")
+        _whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+        log.info("Whisper model loaded")
+    return _whisper_model
 
 
 SYSTEM_PROMPT = """\
@@ -100,16 +100,17 @@ async def calculate_kbju(text: str) -> MealResult:
     return MealResult.model_validate(data)
 
 
+def _transcribe_sync(file_path: str) -> str:
+    model = _get_whisper()
+    segments, info = model.transcribe(file_path, language="ru", beam_size=3)
+    text = " ".join(seg.text.strip() for seg in segments).strip()
+    return text
+
+
 async def transcribe_voice(file_path: str | Path) -> str:
-    """Transcribe an audio file using Groq Whisper."""
-    client = _get_groq_client()
-    with open(file_path, "rb") as f:
-        response = await client.audio.transcriptions.create(
-            model="whisper-large-v3-turbo",
-            file=f,
-            language="ru",
-        )
-    text = response.text.strip()
+    """Transcribe an audio file using local faster-whisper."""
+    loop = asyncio.get_running_loop()
+    text = await loop.run_in_executor(None, partial(_transcribe_sync, str(file_path)))
     log.info("Whisper transcription: %s", text[:200])
     if not text:
         raise ValueError("Whisper returned empty transcription")
