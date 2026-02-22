@@ -9,11 +9,15 @@ from requests_oauthlib import OAuth1Session
 import config
 
 
+SIGNATURE_TYPE = "QUERY"
+
+
 def _get_request_token() -> tuple[str, str]:
     oauth = OAuth1Session(
         config.FS_CONSUMER_KEY,
         client_secret=config.FS_CONSUMER_SECRET,
         callback_uri="oob",
+        signature_type=SIGNATURE_TYPE,
     )
     resp = oauth.fetch_request_token(config.FS_REQUEST_TOKEN_URL)
     return resp["oauth_token"], resp["oauth_token_secret"]
@@ -32,6 +36,7 @@ def _get_access_token(
         resource_owner_key=request_token,
         resource_owner_secret=request_secret,
         verifier=verifier,
+        signature_type=SIGNATURE_TYPE,
     )
     resp = oauth.fetch_access_token(config.FS_ACCESS_TOKEN_URL)
     return resp["oauth_token"], resp["oauth_token_secret"]
@@ -48,6 +53,7 @@ def _api_call(
         client_secret=config.FS_CONSUMER_SECRET,
         resource_owner_key=access_token,
         resource_owner_secret=access_secret,
+        signature_type=SIGNATURE_TYPE,
     )
     req_params = {"method": method, "format": "json"}
     if params:
@@ -62,6 +68,7 @@ def _server_api_call(method: str, params: dict | None = None) -> dict:
     oauth = OAuth1Session(
         config.FS_CONSUMER_KEY,
         client_secret=config.FS_CONSUMER_SECRET,
+        signature_type=SIGNATURE_TYPE,
     )
     req_params = {"method": method, "format": "json"}
     if params:
