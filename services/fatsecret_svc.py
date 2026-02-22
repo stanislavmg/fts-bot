@@ -1,26 +1,46 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import date
 from functools import partial
+from urllib.parse import parse_qs
 
-from requests_oauthlib import OAuth1Session
+import requests
+from requests_oauthlib import OAuth1
 
 import config
 
+log = logging.getLogger(__name__)
 
-SIGNATURE_TYPE = "QUERY"
 
+def _make_auth(
+    resource_owner_key: str | None = None,
+    resource_owner_secret: str | None = None,
+    callback_uri: str | None = None,
+    verifier: str | None = None,
+) -> OAuth1:
+    return OAuth1(
+        client_key=config.FS_CONSUMER_KEY,
+        client_secret=config.FS_CONSUMER_SECRET,
+        resource_owner_key=resource_owner_key,
+        resource_owner_secret=resource_owner_secret,
+        callback_uri=callback_uri,
+        verifier=verifier,
+    )
+
+
+# ── OAuth flow (sync) ────────────────────────────────────────────
 
 def _get_request_token() -> tuple[str, str]:
-    oauth = OAuth1Session(
-        config.FS_CONSUMER_KEY,
-        client_secret=config.FS_CONSUMER_SECRET,
-        callback_uri="oob",
-        signature_type=SIGNATURE_TYPE,
-    )
-    resp = oauth.fetch_request_token(config.FS_REQUEST_TOKEN_URL)
-    return resp["oauth_token"], resp["oauth_token_secret"]
+    auth = _make_auth(callback_uri="oob")
+    resp = requests.post(config.FS_REQUEST_TOKEN_URL, auth=auth)
+    if resp.status_code != 200:
+        raise ValueError(
+            f"FatSecret request_token failed ({resp.status_code}): {resp.text}"
+        )
+    data = parse_qs(resp.text)
+    return data["oauth_token"][0], data["oauth_token_secret"][0]
 
 
 def _get_authorize_url(request_token: str) -> str:
@@ -30,17 +50,21 @@ def _get_authorize_url(request_token: str) -> str:
 def _get_access_token(
     request_token: str, request_secret: str, verifier: str
 ) -> tuple[str, str]:
-    oauth = OAuth1Session(
-        config.FS_CONSUMER_KEY,
-        client_secret=config.FS_CONSUMER_SECRET,
+    auth = _make_auth(
         resource_owner_key=request_token,
         resource_owner_secret=request_secret,
         verifier=verifier,
-        signature_type=SIGNATURE_TYPE,
     )
-    resp = oauth.fetch_access_token(config.FS_ACCESS_TOKEN_URL)
-    return resp["oauth_token"], resp["oauth_token_secret"]
+    resp = requests.post(config.FS_ACCESS_TOKEN_URL, auth=auth)
+    if resp.status_code != 200:
+        raise ValueError(
+            f"FatSecret access_token failed ({resp.status_code}): {resp.text}"
+        )
+    data = parse_qs(resp.text)
+    return data["oauth_token"][0], data["oauth_token_secret"][0]
 
+
+# ── API calls (sync) ─────────────────────────────────────────────
 
 def _api_call(
     access_token: str,
@@ -48,32 +72,25 @@ def _api_call(
     method: str,
     params: dict | None = None,
 ) -> dict:
-    oauth = OAuth1Session(
-        config.FS_CONSUMER_KEY,
-        client_secret=config.FS_CONSUMER_SECRET,
+    auth = _make_auth(
         resource_owner_key=access_token,
         resource_owner_secret=access_secret,
-        signature_type=SIGNATURE_TYPE,
     )
     req_params = {"method": method, "format": "json"}
     if params:
         req_params.update(params)
-    resp = oauth.post(config.FS_API_URL, params=req_params)
+    resp = requests.post(config.FS_API_URL, params=req_params, auth=auth)
     resp.raise_for_status()
     return resp.json()
 
 
 def _server_api_call(method: str, params: dict | None = None) -> dict:
     """2-legged OAuth call (no user token) for public endpoints like foods.search."""
-    oauth = OAuth1Session(
-        config.FS_CONSUMER_KEY,
-        client_secret=config.FS_CONSUMER_SECRET,
-        signature_type=SIGNATURE_TYPE,
-    )
+    auth = _make_auth()
     req_params = {"method": method, "format": "json"}
     if params:
         req_params.update(params)
-    resp = oauth.get(config.FS_API_URL, params=req_params)
+    resp = requests.get(config.FS_API_URL, params=req_params, auth=auth)
     resp.raise_for_status()
     return resp.json()
 
