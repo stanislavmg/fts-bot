@@ -74,12 +74,12 @@ def _format_matches(matches: list[dict], result: MealResult) -> str:
                 "carbs": item.carbs / w * 100,
             }
             pct = _match_percent(nutr, gpt)
-            header = f'{i}. <b>{item.name}</b> → {m["food_name"]}  ({pct}%)'
+            header = f'{i}. <b>{item.name}</b> ({item.weight_g:.0f}г) → {m["food_name"]}  ({pct}%)'
             table = (
                 f"<pre>"
-                f"       Ккал   Б      Ж      У\n"
-                f" FS:   {nutr['calories']:>5.0f}  {nutr['protein']:>5.1f}  {nutr['fat']:>5.1f}  {nutr['carbs']:>5.1f}\n"
-                f" GPT:  {gpt['calories']:>5.0f}  {gpt['protein']:>5.1f}  {gpt['fat']:>5.1f}  {gpt['carbs']:>5.1f}"
+                f"  на 100г  Ккал   Б     Ж     У\n"
+                f"  FS:     {nutr['calories']:>5.0f} {nutr['protein']:>5.1f} {nutr['fat']:>5.1f} {nutr['carbs']:>5.1f}\n"
+                f"  GPT:    {gpt['calories']:>5.0f} {gpt['protein']:>5.1f} {gpt['fat']:>5.1f} {gpt['carbs']:>5.1f}"
                 f"</pre>"
             )
             lines.append(f"{header}\n{table}")
