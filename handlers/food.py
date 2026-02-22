@@ -43,6 +43,21 @@ def _format_kbju(result: MealResult) -> str:
     return "\n".join(lines)
 
 
+def _match_percent(nutr: dict[str, float], gpt: dict[str, float]) -> int:
+    """Calculate how closely FS nutrition matches GPT estimate (0-100%)."""
+    total_w = 0.0
+    similarity = 0.0
+    for key, w in (("calories", 2.0), ("protein", 1.0), ("fat", 1.0), ("carbs", 1.0)):
+        total_w += w
+        t = gpt.get(key, 0)
+        f = nutr.get(key, 0)
+        if t > 0:
+            similarity += w * max(0, 1 - abs(f - t) / t)
+        elif f == 0:
+            similarity += w
+    return round(similarity / total_w * 100)
+
+
 def _format_matches(matches: list[dict], result: MealResult) -> str:
     lines = ["<b>Найдено в FatSecret:</b>\n"]
     for i, (item, m) in enumerate(zip(result.items, matches), 1):
@@ -52,17 +67,24 @@ def _format_matches(matches: list[dict], result: MealResult) -> str:
         nutr = m.get("nutrition")
         w = item.weight_g if item.weight_g else 1
         if nutr:
-            lines.append(
-                f'{i}. <b>{item.name}</b> → {m["food_name"]}\n'
-                f"   FS:  К:{nutr['calories']:.0f} Б:{nutr['protein']:.1f} "
-                f"Ж:{nutr['fat']:.1f} У:{nutr['carbs']:.1f} /100г\n"
-                f"   GPT: К:{item.calories / w * 100:.0f} Б:{item.protein / w * 100:.1f} "
-                f"Ж:{item.fat / w * 100:.1f} У:{item.carbs / w * 100:.1f} /100г"
+            gpt = {
+                "calories": item.calories / w * 100,
+                "protein": item.protein / w * 100,
+                "fat": item.fat / w * 100,
+                "carbs": item.carbs / w * 100,
+            }
+            pct = _match_percent(nutr, gpt)
+            header = f'{i}. <b>{item.name}</b> → {m["food_name"]}  ({pct}%)'
+            table = (
+                f"<pre>"
+                f"       Ккал   Б      Ж      У\n"
+                f" FS:   {nutr['calories']:>5.0f}  {nutr['protein']:>5.1f}  {nutr['fat']:>5.1f}  {nutr['carbs']:>5.1f}\n"
+                f" GPT:  {gpt['calories']:>5.0f}  {gpt['protein']:>5.1f}  {gpt['fat']:>5.1f}  {gpt['carbs']:>5.1f}"
+                f"</pre>"
             )
+            lines.append(f"{header}\n{table}")
         else:
-            lines.append(
-                f'{i}. <b>{item.name}</b> → {m["food_name"]}'
-            )
+            lines.append(f'{i}. <b>{item.name}</b> → {m["food_name"]}')
     return "\n".join(lines)
 
 
