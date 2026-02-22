@@ -15,3 +15,9 @@ FS_ACCESS_TOKEN_URL = "https://authentication.fatsecret.com/oauth/access_token"
 FS_API_URL = "https://platform.fatsecret.com/rest/server.api"
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "bot.db")
+
+ALLOWED_USERS: set[int] = {
+    5670123751, # @stanislavinra
+    1633534244, # @stanislavgm
+    880797622, # @li_rka
+}
