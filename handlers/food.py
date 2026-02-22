@@ -35,14 +35,14 @@ def _format_kbju(result: MealResult) -> str:
     for i, item in enumerate(result.items, 1):
         lines.append(
             f"{i}. <b>{item.name}</b> ({item.weight_g:.0f} г)\n"
-            f"   К: {item.calories:.0f} | Б: {item.protein:.1f} | "
-            f"Ж: {item.fat:.1f} | У: {item.carbs:.1f}"
+            f"   {item.calories:.0f} ккал \u00b7 Б {item.protein:.1f} \u00b7 "
+            f"Ж {item.fat:.1f} \u00b7 У {item.carbs:.1f}"
         )
     lines.append(
-        f"\n<b>Итого:</b> {result.total_calories:.0f} ккал | "
-        f"Б: {result.total_protein:.1f} | "
-        f"Ж: {result.total_fat:.1f} | "
-        f"У: {result.total_carbs:.1f}"
+        f"\n<b>Итого:</b> {result.total_calories:.0f} ккал \u00b7 "
+        f"Б {result.total_protein:.1f} \u00b7 "
+        f"Ж {result.total_fat:.1f} \u00b7 "
+        f"У {result.total_carbs:.1f}"
     )
     return "\n".join(lines)
 
@@ -71,6 +71,10 @@ def _gpt_per_100(item: FoodItem) -> dict[str, float]:
     }
 
 
+def _fmt_kbju(n: dict[str, float]) -> str:
+    return f"{n['calories']:.0f} ккал \u00b7 Б {n['protein']:.1f} \u00b7 Ж {n['fat']:.1f} \u00b7 У {n['carbs']:.1f}"
+
+
 def _format_pick_message(
     item: FoodItem,
     candidates: list[dict],
@@ -78,21 +82,16 @@ def _format_pick_message(
     total_items: int,
 ) -> str:
     gpt = _gpt_per_100(item)
-    labels = ["a", "b", "c"]
+    labels = ["1", "2", "3"]
     lines = [
-        f"<b>[{item_idx + 1}/{total_items}] {item.name}</b> ({item.weight_g:.0f}г)\n"
+        f"<b>[{item_idx + 1}/{total_items}] {item.name}</b> ({item.weight_g:.0f}г)",
+        f"\U0001f4ca GPT на 100г: {_fmt_kbju(gpt)}",
     ]
-    lines.append(
-        f"<pre>"
-        f"  на 100г  Ккал   Б     Ж     У\n"
-        f"  GPT:    {gpt['calories']:>5.0f} {gpt['protein']:>5.1f} {gpt['fat']:>5.1f} {gpt['carbs']:>5.1f}"
-        f"</pre>\n"
-    )
     if not candidates:
-        lines.append("<i>Ничего не найдено в FatSecret.</i>")
+        lines.append("\n<i>Ничего не найдено в FatSecret.</i>")
         return "\n".join(lines)
 
-    lines.append("Варианты из FatSecret:\n")
+    lines.append("")
     for j, c in enumerate(candidates):
         nutr = c.get("nutrition", {})
         if not nutr:
@@ -105,18 +104,14 @@ def _format_pick_message(
         else:
             badge = f"\u2757 {pct}%"
         lbl = labels[j] if j < len(labels) else str(j)
-        lines.append(
-            f"<b>{lbl})</b> {c['food_name']}  {badge}\n"
-            f"<pre>"
-            f"         {nutr['calories']:>5.0f} {nutr['protein']:>5.1f} {nutr['fat']:>5.1f} {nutr['carbs']:>5.1f}"
-            f"</pre>"
-        )
+        lines.append(f"<b>{lbl})</b> {badge} {c['food_name']}")
+        lines.append(f"     {_fmt_kbju(nutr)}")
 
     return "\n".join(lines)
 
 
 def _pick_keyboard(num_candidates: int) -> InlineKeyboardMarkup:
-    labels = ["a", "b", "c"]
+    labels = ["1", "2", "3"]
     buttons_row = []
     for j in range(min(num_candidates, 3)):
         buttons_row.append(
