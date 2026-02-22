@@ -27,6 +27,7 @@ def _make_auth(
         resource_owner_secret=resource_owner_secret,
         callback_uri=callback_uri,
         verifier=verifier,
+        signature_type="QUERY",
     )
 
 
@@ -55,7 +56,7 @@ def _get_access_token(
         resource_owner_secret=request_secret,
         verifier=verifier,
     )
-    resp = requests.post(config.FS_ACCESS_TOKEN_URL, auth=auth)
+    resp = requests.get(config.FS_ACCESS_TOKEN_URL, auth=auth)
     if resp.status_code != 200:
         raise ValueError(
             f"FatSecret access_token failed ({resp.status_code}): {resp.text}"
