@@ -56,37 +56,24 @@ async def complete_auth(telegram_id: int, pin: str) -> tuple[str, str]:
 
 # ── Food search & diary ──────────────────────────────────────────
 
-def _search_food_sync(query: str, page: int = 0, max_results: int = 50) -> list[dict]:
-    """Direct API call with max_results support (pyfatsecret ignores it)."""
+async def search_food(query: str, page: int = 0, max_results: int = 50) -> list[dict]:
+    """Search FatSecret with foods_search (supports max_results up to 50)."""
     fs = Fatsecret(config.FS_CONSUMER_KEY, config.FS_CONSUMER_SECRET)
     try:
-        resp = fs.make_request(
-            "foods.search",
-            {
-                "search_expression": query,
-                "page_number": str(page),
-                "max_results": str(max_results),
-            },
-        )
-    except Exception:
-        return []
-    foods = resp.get("foods", {})
-    food_list = foods.get("food", [])
-    if food_list is None:
-        return []
-    if isinstance(food_list, dict):
-        return [food_list]
-    return food_list
-
-
-async def search_food(query: str, page: int = 0, max_results: int = 50) -> list[dict]:
-    try:
         results = await asyncio.get_running_loop().run_in_executor(
-            None, partial(_search_food_sync, query, page, max_results)
+            None,
+            partial(fs.foods_search, query, page_number=page, max_results=max_results),
         )
-    except Exception:
-        log.warning("FatSecret search failed for: %s (page %d)", query, page)
+    except (KeyError, TypeError):
+        log.warning("FatSecret search returned no results for: %s (page %d)", query, page)
         return []
+    except Exception:
+        log.exception("FatSecret search failed for: %s (page %d)", query, page)
+        return []
+    if results is None:
+        return []
+    if isinstance(results, dict):
+        return [results]
     return results
 
 
@@ -98,7 +85,7 @@ def _clean_russian_query(name: str) -> str:
 
 
 async def search_food_multi(queries: list[str], fallback_name: str = "") -> list[dict]:
-    """Search multiple queries in parallel (50 results each), deduplicate by food_id."""
+    """Search multiple queries in parallel (up to 50 each), deduplicate."""
     all_queries = list(queries)
     if fallback_name:
         cleaned = _clean_russian_query(fallback_name)
