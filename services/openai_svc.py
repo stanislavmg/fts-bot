@@ -20,6 +20,8 @@ def _get_client() -> AsyncOpenAI:
         _client = AsyncOpenAI(
             api_key=config.LLM_API_KEY,
             base_url=config.LLM_BASE_URL,
+            max_retries=2,
+            timeout=30.0,
         )
     return _client
 
@@ -69,7 +71,14 @@ async def calculate_kbju(text: str) -> MealResult:
             {"role": "user", "content": text},
         ],
         temperature=0.3,
+        timeout=30.0,
     )
+    if not response.choices:
+        log.error("LLM returned no choices: %s", response)
+        raise ValueError("LLM returned empty response")
     raw = response.choices[0].message.content
+    log.info("LLM raw response: %s", raw[:500] if raw else "<None>")
+    if not raw:
+        raise ValueError("LLM returned empty content")
     data = _extract_json(raw)
     return MealResult.model_validate(data)
