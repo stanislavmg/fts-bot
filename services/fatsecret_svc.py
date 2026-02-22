@@ -78,6 +78,9 @@ async def search_food_multi(queries: list[str]) -> list[dict]:
     tasks = [search_food(q, page=0, max_results=50) for q in queries]
     all_results = await asyncio.gather(*tasks)
 
+    for q, results in zip(queries, all_results):
+        log.info("FatSecret search '%s' → %d results", q, len(results))
+
     seen: set[str] = set()
     combined: list[dict] = []
     for results in all_results:
@@ -86,6 +89,7 @@ async def search_food_multi(queries: list[str]) -> list[dict]:
             if fid not in seen:
                 seen.add(fid)
                 combined.append(item)
+    log.info("FatSecret combined: %d unique results from %d queries", len(combined), len(queries))
     return combined
 
 

@@ -315,16 +315,20 @@ async def _search_and_show_item(
     )
 
     target = _gpt_per_100(item)
+    log.info(
+        "Searching FatSecret for '%s', queries=%s", item.name, item.search_queries
+    )
     candidates = []
     try:
         candidates = await fatsecret_svc.match_food_top(
             search_queries=item.search_queries,
             fallback_name=item.name,
             target=target,
-            top_n=3,
+            top_n=6,
         )
     except Exception:
         log.exception("FatSecret search failed for %s", item.name)
+    log.info("Found %d candidates for '%s'", len(candidates), item.name)
 
     exclude_ids = set(used.get(str(idx), {}).get("seen_food_ids", []))
     candidates = [c for c in candidates if c["food_id"] not in exclude_ids][:3]
@@ -423,7 +427,6 @@ async def on_pick(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Ищу другие варианты...")
         result = MealResult.model_validate(data["meal_result"])
         item = result.items[idx]
-        target = _gpt_per_100(item)
 
         try:
             new_queries = await openai_svc.get_more_search_queries(
@@ -435,7 +438,10 @@ async def on_pick(callback: CallbackQuery, state: FSMContext) -> None:
             new_queries = []
 
         if new_queries:
-            item.search_queries = new_queries
+            log.info("Retry search for '%s' with queries: %s", item.name, new_queries)
+            meal_data = data["meal_result"]
+            meal_data["items"][idx]["search_queries"] = new_queries
+            await state.update_data(meal_result=meal_data)
 
         await _search_and_show_item(callback, state)
         return

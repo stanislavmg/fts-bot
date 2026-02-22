@@ -144,11 +144,15 @@ async def get_more_search_queries(name: str, tried: list[str]) -> list[str]:
         timeout=15.0,
     )
     if not response.choices:
+        log.warning("LLM returned no choices for retry queries")
         return []
     raw = response.choices[0].message.content
+    log.info("LLM retry queries for '%s': %s", name, raw[:300] if raw else "<None>")
     if not raw:
         return []
     data = _extract_json(raw)
     if isinstance(data, list):
-        return [str(q) for q in data[:3]]
+        queries = [str(q) for q in data[:3]]
+        log.info("Parsed retry queries: %s", queries)
+        return queries
     return []
