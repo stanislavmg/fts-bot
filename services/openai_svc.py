@@ -119,3 +119,36 @@ async def transcribe_voice(file_path: str | Path) -> str:
     if not text:
         raise ValueError("Whisper returned empty transcription")
     return text
+
+
+RETRY_SEARCH_PROMPT = """\
+Пользователь ищет продукт "{name}" в базе данных еды.
+Предыдущие поисковые запросы не дали хорошего результата: {tried}
+
+Придумай 3 новых поисковых запроса на английском языке, которые могут найти этот продукт.
+Используй синонимы, альтернативные названия, более общие или более конкретные формулировки.
+
+Ответь ТОЛЬКО JSON-массивом строк, без пояснений:
+["query1", "query2", "query3"]\
+"""
+
+
+async def get_more_search_queries(name: str, tried: list[str]) -> list[str]:
+    """Ask LLM for alternative search queries for a food product."""
+    client = _get_client()
+    prompt = RETRY_SEARCH_PROMPT.format(name=name, tried=", ".join(tried) or "нет")
+    response = await client.chat.completions.create(
+        model=config.LLM_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7,
+        timeout=15.0,
+    )
+    if not response.choices:
+        return []
+    raw = response.choices[0].message.content
+    if not raw:
+        return []
+    data = _extract_json(raw)
+    if isinstance(data, list):
+        return [str(q) for q in data[:3]]
+    return []

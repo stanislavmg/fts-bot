@@ -14,7 +14,7 @@ from aiogram.types import (
     InlineKeyboardButton,
 )
 
-from models import MealResult
+from models import MealResult, FoodItem
 from services import db, openai_svc, fatsecret_svc
 
 router = Router()
@@ -23,7 +23,11 @@ log = logging.getLogger(__name__)
 
 class FoodStates(StatesGroup):
     waiting_for_meal_choice = State()
+    picking_fs_items = State()
     waiting_for_fs_confirm = State()
+
+
+# ── Formatting helpers ────────────────────────────────────────────
 
 
 def _format_kbju(result: MealResult) -> str:
@@ -44,7 +48,6 @@ def _format_kbju(result: MealResult) -> str:
 
 
 def _match_percent(nutr: dict[str, float], gpt: dict[str, float]) -> int:
-    """Calculate how closely FS nutrition matches GPT estimate (0-100%)."""
     total_w = 0.0
     similarity = 0.0
     for key, w in (("calories", 2.0), ("protein", 1.0), ("fat", 1.0), ("carbs", 1.0)):
@@ -58,42 +61,92 @@ def _match_percent(nutr: dict[str, float], gpt: dict[str, float]) -> int:
     return round(similarity / total_w * 100)
 
 
-def _format_matches(matches: list[dict], result: MealResult) -> str:
-    lines = ["<b>Найдено в FatSecret:</b>\n"]
-    for i, (item, m) in enumerate(zip(result.items, matches), 1):
-        if m is None:
-            lines.append(f"{i}. {item.name} — <i>не найдено</i>")
+def _gpt_per_100(item: FoodItem) -> dict[str, float]:
+    w = item.weight_g if item.weight_g else 1
+    return {
+        "calories": item.calories / w * 100,
+        "protein": item.protein / w * 100,
+        "fat": item.fat / w * 100,
+        "carbs": item.carbs / w * 100,
+    }
+
+
+def _format_pick_message(
+    item: FoodItem,
+    candidates: list[dict],
+    item_idx: int,
+    total_items: int,
+) -> str:
+    gpt = _gpt_per_100(item)
+    labels = ["a", "b", "c"]
+    lines = [
+        f"<b>[{item_idx + 1}/{total_items}] {item.name}</b> ({item.weight_g:.0f}г)\n"
+    ]
+    lines.append(
+        f"<pre>"
+        f"  на 100г  Ккал   Б     Ж     У\n"
+        f"  GPT:    {gpt['calories']:>5.0f} {gpt['protein']:>5.1f} {gpt['fat']:>5.1f} {gpt['carbs']:>5.1f}"
+        f"</pre>\n"
+    )
+    if not candidates:
+        lines.append("<i>Ничего не найдено в FatSecret.</i>")
+        return "\n".join(lines)
+
+    lines.append("Варианты из FatSecret:\n")
+    for j, c in enumerate(candidates):
+        nutr = c.get("nutrition", {})
+        if not nutr:
             continue
-        nutr = m.get("nutrition")
-        w = item.weight_g if item.weight_g else 1
-        if nutr:
-            gpt = {
-                "calories": item.calories / w * 100,
-                "protein": item.protein / w * 100,
-                "fat": item.fat / w * 100,
-                "carbs": item.carbs / w * 100,
-            }
-            pct = _match_percent(nutr, gpt)
-            if pct >= 80:
-                badge = f"{pct}%"
-            elif pct >= 60:
-                badge = f"\u26a0\ufe0f {pct}%"
-            else:
-                badge = f"\u274c {pct}%"
-            header = f'{i}. <b>{item.name}</b> ({item.weight_g:.0f}г) → {m["food_name"]}  {badge}'
-            table = (
-                f"<pre>"
-                f"  на 100г  Ккал   Б     Ж     У\n"
-                f"  FS:     {nutr['calories']:>5.0f} {nutr['protein']:>5.1f} {nutr['fat']:>5.1f} {nutr['carbs']:>5.1f}\n"
-                f"  GPT:    {gpt['calories']:>5.0f} {gpt['protein']:>5.1f} {gpt['fat']:>5.1f} {gpt['carbs']:>5.1f}"
-                f"</pre>"
-            )
-            if pct < 70:
-                table += "\n   <i>\u26a0\ufe0f КБЖУ в дневнике может отличаться</i>"
-            lines.append(f"{header}\n{table}")
+        pct = _match_percent(nutr, gpt)
+        if pct >= 80:
+            badge = f"{pct}%"
+        elif pct >= 60:
+            badge = f"\u26a0\ufe0f {pct}%"
         else:
-            lines.append(f'{i}. <b>{item.name}</b> → {m["food_name"]}')
+            badge = f"\u274c {pct}%"
+        lbl = labels[j] if j < len(labels) else str(j)
+        lines.append(
+            f"<b>{lbl})</b> {c['food_name']}  {badge}\n"
+            f"<pre>"
+            f"         {nutr['calories']:>5.0f} {nutr['protein']:>5.1f} {nutr['fat']:>5.1f} {nutr['carbs']:>5.1f}"
+            f"</pre>"
+        )
+
     return "\n".join(lines)
+
+
+def _pick_keyboard(num_candidates: int) -> InlineKeyboardMarkup:
+    labels = ["a", "b", "c"]
+    buttons_row = []
+    for j in range(min(num_candidates, 3)):
+        buttons_row.append(
+            InlineKeyboardButton(text=labels[j], callback_data=f"pick_{j}")
+        )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            buttons_row,
+            [
+                InlineKeyboardButton(text="\U0001f504 Искать ещё", callback_data="pick_retry"),
+                InlineKeyboardButton(text="\u23ed Пропустить", callback_data="pick_skip"),
+            ],
+        ]
+    )
+
+
+def _format_summary(selections: list[dict | None], result: MealResult) -> str:
+    lines = ["<b>Выбранные продукты:</b>\n"]
+    for i, (item, sel) in enumerate(zip(result.items, selections), 1):
+        if sel is None:
+            lines.append(f"{i}. {item.name} — <i>пропущено</i>")
+            continue
+        nutr = sel.get("nutrition", {})
+        gpt = _gpt_per_100(item)
+        pct = _match_percent(nutr, gpt) if nutr else 0
+        lines.append(f'{i}. <b>{item.name}</b> → {sel["food_name"]}  ({pct}%)')
+    return "\n".join(lines)
+
+
+# ── Static keyboards ─────────────────────────────────────────────
 
 
 CONFIRM_KB = InlineKeyboardMarkup(
@@ -102,9 +155,7 @@ CONFIRM_KB = InlineKeyboardMarkup(
             InlineKeyboardButton(text="Сохранить", callback_data="meal_save"),
             InlineKeyboardButton(text="Пересчитать", callback_data="meal_retry"),
         ],
-        [
-            InlineKeyboardButton(text="Отмена", callback_data="meal_cancel"),
-        ],
+        [InlineKeyboardButton(text="Отмена", callback_data="meal_cancel")],
     ]
 )
 
@@ -124,13 +175,14 @@ MEAL_KB = InlineKeyboardMarkup(
 FS_CONFIRM_KB = InlineKeyboardMarkup(
     inline_keyboard=[
         [
-            InlineKeyboardButton(
-                text="Записать в дневник", callback_data="fs_confirm"
-            ),
+            InlineKeyboardButton(text="Записать в дневник", callback_data="fs_confirm"),
             InlineKeyboardButton(text="Отмена", callback_data="fs_cancel"),
         ],
     ]
 )
+
+
+# ── Handlers ──────────────────────────────────────────────────────
 
 
 async def _ensure_authorized(message: Message) -> bool:
@@ -143,7 +195,6 @@ async def _ensure_authorized(message: Message) -> bool:
 async def _process_food_text(
     text: str, message: Message, state: FSMContext, wait_msg: Message
 ) -> None:
-    """Common logic: send text to LLM, show KBJU result."""
     try:
         result = await openai_svc.calculate_kbju(text)
     except Exception:
@@ -167,19 +218,16 @@ async def handle_voice(message: Message, state: FSMContext, bot: Bot) -> None:
     current_state = await state.get_state()
     if current_state is not None:
         return
-
     if not await _ensure_authorized(message):
         return
 
     wait_msg = await message.answer("Распознаю голосовое...")
-
     tmp_path = None
     try:
         file = await bot.get_file(message.voice.file_id)
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".oga")
         os.close(tmp_fd)
         await bot.download_file(file.file_path, tmp_path)
-
         text = await openai_svc.transcribe_voice(tmp_path)
     except Exception:
         log.exception("Voice transcription failed")
@@ -200,7 +248,6 @@ async def handle_text(message: Message, state: FSMContext) -> None:
     current_state = await state.get_state()
     if current_state is not None:
         return
-
     if not await _ensure_authorized(message):
         return
 
@@ -223,17 +270,13 @@ async def on_retry(callback: CallbackQuery, state: FSMContext) -> None:
         result = await openai_svc.calculate_kbju(original_text)
     except Exception:
         log.exception("GPT retry failed")
-        await callback.message.edit_text(
-            "Ошибка. Попробуй отправить сообщение заново."
-        )
+        await callback.message.edit_text("Ошибка. Попробуй отправить сообщение заново.")
         await state.clear()
         return
 
     await state.update_data(meal_result=result.model_dump())
     await callback.message.edit_text(
-        _format_kbju(result),
-        reply_markup=CONFIRM_KB,
-        parse_mode="HTML",
+        _format_kbju(result), reply_markup=CONFIRM_KB, parse_mode="HTML"
     )
 
 
@@ -253,10 +296,63 @@ async def on_save(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.message.edit_text(text, reply_markup=MEAL_KB, parse_mode="HTML")
 
 
+# ── Meal type → start item-by-item picking ────────────────────────
+
+
+async def _search_and_show_item(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    """Search FatSecret for the current item and show top-3 candidates."""
+    data = await state.get_data()
+    result = MealResult.model_validate(data["meal_result"])
+    idx = data["current_item_idx"]
+    item = result.items[idx]
+    used = data.get("used_queries", {})
+
+    await callback.message.edit_text(
+        f"<b>[{idx + 1}/{len(result.items)}] {item.name}</b>\n\nИщу в FatSecret...",
+        parse_mode="HTML",
+    )
+
+    target = _gpt_per_100(item)
+    candidates = []
+    try:
+        candidates = await fatsecret_svc.match_food_top(
+            search_queries=item.search_queries,
+            fallback_name=item.name,
+            target=target,
+            top_n=3,
+        )
+    except Exception:
+        log.exception("FatSecret search failed for %s", item.name)
+
+    exclude_ids = set(used.get(str(idx), {}).get("seen_food_ids", []))
+    candidates = [c for c in candidates if c["food_id"] not in exclude_ids][:3]
+
+    item_used = used.get(str(idx), {"seen_food_ids": [], "queries": []})
+    for c in candidates:
+        if c["food_id"] not in item_used["seen_food_ids"]:
+            item_used["seen_food_ids"].append(c["food_id"])
+    item_used["queries"] = list(set(item_used.get("queries", []) + item.search_queries))
+    used[str(idx)] = item_used
+    await state.update_data(
+        current_candidates=candidates,
+        used_queries=used,
+    )
+
+    text = _format_pick_message(item, candidates, idx, len(result.items))
+    kb = _pick_keyboard(len(candidates)) if candidates else InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="\U0001f504 Искать ещё", callback_data="pick_retry"),
+            InlineKeyboardButton(text="\u23ed Пропустить", callback_data="pick_skip"),
+        ]]
+    )
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
 @router.callback_query(F.data.startswith("mt_"))
 async def on_meal_type(callback: CallbackQuery, state: FSMContext) -> None:
     meal_type = callback.data.removeprefix("mt_")
-
     data = await state.get_data()
     meal_data = data.get("meal_result")
     if not meal_data:
@@ -264,67 +360,115 @@ async def on_meal_type(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         return
 
-    result = MealResult.model_validate(meal_data)
     tokens = await db.get_access_tokens(callback.from_user.id)
     if not tokens:
         await callback.answer("Не авторизован в FatSecret.")
         await state.clear()
         return
 
-    await callback.answer("Ищу продукты в FatSecret...")
-    await callback.message.edit_text(
-        _format_kbju(result) + "\n\nИщу продукты в базе FatSecret...",
-        parse_mode="HTML",
+    result = MealResult.model_validate(meal_data)
+    await callback.answer("Ищу продукты...")
+    await state.update_data(
+        meal_type=meal_type,
+        current_item_idx=0,
+        item_selections=[None] * len(result.items),
+        used_queries={},
     )
+    await state.set_state(FoodStates.picking_fs_items)
+    await _search_and_show_item(callback, state)
 
-    matches: list[dict | None] = []
-    for item in result.items:
-        w = item.weight_g if item.weight_g else 1
-        target_per_100 = {
-            "calories": item.calories / w * 100,
-            "protein": item.protein / w * 100,
-            "fat": item.fat / w * 100,
-            "carbs": item.carbs / w * 100,
-        }
+
+# ── Pick handlers ─────────────────────────────────────────────────
+
+
+async def _advance_to_next_item(callback: CallbackQuery, state: FSMContext) -> None:
+    """Move to the next item or show final summary."""
+    data = await state.get_data()
+    result = MealResult.model_validate(data["meal_result"])
+    idx = data["current_item_idx"] + 1
+
+    if idx >= len(result.items):
+        selections = data["item_selections"]
+        await state.update_data(item_selections=selections)
+        await state.set_state(FoodStates.waiting_for_fs_confirm)
+
+        text = _format_summary(selections, result)
+        selected = sum(1 for s in selections if s is not None)
+        text += f"\n\nВыбрано: {selected} из {len(result.items)}"
+        await callback.message.edit_text(
+            text, reply_markup=FS_CONFIRM_KB, parse_mode="HTML"
+        )
+        return
+
+    await state.update_data(current_item_idx=idx)
+    await _search_and_show_item(callback, state)
+
+
+@router.callback_query(F.data.startswith("pick_"), FoodStates.picking_fs_items)
+async def on_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    action = callback.data.removeprefix("pick_")
+    data = await state.get_data()
+    idx = data["current_item_idx"]
+    selections = data["item_selections"]
+    candidates = data.get("current_candidates", [])
+
+    if action == "skip":
+        await callback.answer("Пропущено")
+        selections[idx] = None
+        await state.update_data(item_selections=selections)
+        await _advance_to_next_item(callback, state)
+        return
+
+    if action == "retry":
+        await callback.answer("Ищу другие варианты...")
+        result = MealResult.model_validate(data["meal_result"])
+        item = result.items[idx]
+        target = _gpt_per_100(item)
+
         try:
-            m = await fatsecret_svc.match_food(
-                search_queries=item.search_queries,
-                fallback_name=item.name,
-                target=target_per_100,
+            new_queries = await openai_svc.get_more_search_queries(
+                item.name,
+                data.get("used_queries", {}).get(str(idx), {}).get("queries", []),
             )
         except Exception:
-            log.exception("FatSecret match failed for %s", item.name)
-            m = None
-        matches.append(m)
+            log.exception("Failed to get more queries for %s", item.name)
+            new_queries = []
 
-    matches_serializable = [m if m else None for m in matches]
-    await state.update_data(
-        fs_matches=matches_serializable,
-        meal_type=meal_type,
-    )
-    await state.set_state(FoodStates.waiting_for_fs_confirm)
+        if new_queries:
+            item.search_queries = new_queries
 
-    text = _format_matches(matches, result)
-    found = sum(1 for m in matches if m is not None)
-    text += f"\n\nНайдено: {found} из {len(result.items)}"
+        await _search_and_show_item(callback, state)
+        return
 
-    await callback.message.edit_text(
-        text, reply_markup=FS_CONFIRM_KB, parse_mode="HTML"
-    )
+    try:
+        pick_idx = int(action)
+    except ValueError:
+        await callback.answer("Ошибка.")
+        return
+
+    if pick_idx >= len(candidates):
+        await callback.answer("Вариант недоступен.")
+        return
+
+    await callback.answer("Выбрано!")
+    selections[idx] = candidates[pick_idx]
+    await state.update_data(item_selections=selections)
+    await _advance_to_next_item(callback, state)
+
+
+# ── Final confirm / cancel ────────────────────────────────────────
 
 
 @router.callback_query(F.data == "fs_confirm")
 async def on_fs_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     meal_labels = {
-        "breakfast": "Завтрак",
-        "lunch": "Обед",
-        "dinner": "Ужин",
-        "other": "Другое",
+        "breakfast": "Завтрак", "lunch": "Обед",
+        "dinner": "Ужин", "other": "Другое",
     }
 
     data = await state.get_data()
     meal_data = data.get("meal_result")
-    matches = data.get("fs_matches", [])
+    selections = data.get("item_selections", [])
     meal_type = data.get("meal_type", "other")
 
     if not meal_data:
@@ -341,20 +485,20 @@ async def on_fs_confirm(callback: CallbackQuery, state: FSMContext) -> None:
 
     await callback.answer("Сохраняю...")
     await callback.message.edit_text(
-        _format_matches(matches, result) + "\n\nЗаписываю в дневник...",
+        _format_summary(selections, result) + "\n\nЗаписываю в дневник...",
         parse_mode="HTML",
     )
 
     errors = []
     skipped = []
-    for item, m in zip(result.items, matches):
-        if m is None:
+    for item, sel in zip(result.items, selections):
+        if sel is None:
             skipped.append(item.name)
             continue
         try:
             await fatsecret_svc.log_matched_food(
                 session_token=tokens,
-                food_id=m["food_id"],
+                food_id=sel["food_id"],
                 entry_name=item.name,
                 weight_g=item.weight_g,
                 meal=meal_type,
@@ -371,12 +515,12 @@ async def on_fs_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     label = meal_labels.get(meal_type, meal_type)
     status_parts = [f"\n\nЗаписано в дневник ({label})!"]
     if skipped:
-        status_parts.append(f"Не найдено в FatSecret: {', '.join(skipped)}")
+        status_parts.append(f"Пропущено: {', '.join(skipped)}")
     if errors:
         status_parts.append(f"Ошибка записи: {', '.join(errors)}")
 
     await callback.message.edit_text(
-        _format_matches(matches, result) + "\n".join(status_parts),
+        _format_summary(selections, result) + "\n".join(status_parts),
         parse_mode="HTML",
     )
 

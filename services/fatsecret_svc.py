@@ -191,55 +191,52 @@ def _kbju_score(
     return score
 
 
-async def match_food(
+async def match_food_top(
     search_queries: list[str],
     fallback_name: str,
     target: dict[str, float],
-) -> dict | None:
-    """Search FatSecret with multiple queries in parallel, return best KBJU match.
+    top_n: int = 3,
+) -> list[dict]:
+    """Search FatSecret with multiple queries in parallel, return top N matches by KBJU.
 
     target: {"calories": ..., "protein": ..., "fat": ..., "carbs": ...} per 100g.
-    Returns dict with keys: food_id, food_name, cal_per_100g, description, nutrition, food_type.
+    Each result dict has: food_id, food_name, cal_per_100g, description, nutrition, food_type, score.
     """
-    queries = [q for q in search_queries if q] or [fallback_name]
+    queries = [q for q in search_queries if q]
+    if fallback_name and fallback_name not in queries:
+        queries.append(fallback_name)
+    if not queries:
+        queries = [fallback_name]
     results = await search_food_multi(queries)
-    if not results and fallback_name not in queries:
-        results = await search_food(fallback_name)
     if not results:
-        return None
+        return []
 
-    best = None
-    best_score = float("inf")
+    scored: list[tuple[float, dict]] = []
+    seen_ids: set[str] = set()
     for item in results:
+        fid = item.get("food_id")
+        if fid in seen_ids:
+            continue
         parsed = _parse_nutrition_from_desc(item.get("food_description", ""))
         if parsed is None:
             continue
         nutr, is_per_100g = parsed
+        if not is_per_100g:
+            continue
         is_generic = item.get("food_type", "").lower() == "generic"
         score = _kbju_score(nutr, target, is_per_100g, is_generic)
+        seen_ids.add(fid)
+        scored.append((score, {
+            "food_id": fid,
+            "food_name": item.get("food_name", fallback_name),
+            "cal_per_100g": nutr["calories"],
+            "description": item.get("food_description", ""),
+            "nutrition": nutr,
+            "food_type": item.get("food_type", ""),
+        }))
 
-        if score < best_score:
-            best_score = score
-            best = {
-                "food_id": item["food_id"],
-                "food_name": item.get("food_name", fallback_name),
-                "cal_per_100g": nutr["calories"] if is_per_100g else None,
-                "description": item.get("food_description", ""),
-                "nutrition": nutr if is_per_100g else None,
-                "food_type": item.get("food_type", ""),
-            }
-
-    if best is None and results:
-        best = {
-            "food_id": results[0]["food_id"],
-            "food_name": results[0].get("food_name", fallback_name),
-            "cal_per_100g": None,
-            "description": results[0].get("food_description", ""),
-            "nutrition": None,
-            "food_type": results[0].get("food_type", ""),
-        }
-
-    return best
+    scored.sort(key=lambda x: x[0])
+    return [entry for _, entry in scored[:top_n]]
 
 
 async def log_matched_food(
