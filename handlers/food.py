@@ -99,11 +99,11 @@ def _format_pick_message(
             continue
         pct = _match_percent(nutr, gpt)
         if pct >= 80:
-            badge = f"{pct}%"
-        elif pct >= 60:
+            badge = f"\u2705 {pct}%"
+        elif pct >= 50:
             badge = f"\u26a0\ufe0f {pct}%"
         else:
-            badge = f"\u274c {pct}%"
+            badge = f"\u2757 {pct}%"
         lbl = labels[j] if j < len(labels) else str(j)
         lines.append(
             f"<b>{lbl})</b> {c['food_name']}  {badge}\n"
@@ -282,6 +282,9 @@ async def on_custom_query(message: Message, state: FSMContext) -> None:
     used = data.get("used_queries", {})
     exclude_ids = set(used.get(str(idx), {}).get("seen_food_ids", []))
     candidates = [c for c in candidates if c["food_id"] not in exclude_ids][:3]
+    candidates.sort(
+        key=lambda c: _match_percent(c.get("nutrition", {}), target), reverse=True
+    )
 
     item_used = used.get(str(idx), {"seen_food_ids": [], "queries": []})
     for c in candidates:
@@ -392,6 +395,9 @@ async def _search_and_show_item(
 
     exclude_ids = set(used.get(str(idx), {}).get("seen_food_ids", []))
     candidates = [c for c in candidates if c["food_id"] not in exclude_ids][:3]
+    candidates.sort(
+        key=lambda c: _match_percent(c.get("nutrition", {}), target), reverse=True
+    )
 
     item_used = used.get(str(idx), {"seen_food_ids": [], "queries": []})
     for c in candidates:
