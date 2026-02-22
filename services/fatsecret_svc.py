@@ -56,29 +56,59 @@ async def complete_auth(telegram_id: int, pin: str) -> tuple[str, str]:
 
 # ── Food search & diary ──────────────────────────────────────────
 
-async def search_food(query: str, page: int = 0, max_results: int = 50) -> list[dict]:
+def _search_food_sync(query: str, page: int = 0, max_results: int = 50) -> list[dict]:
+    """Direct API call with max_results support (pyfatsecret ignores it)."""
     fs = Fatsecret(config.FS_CONSUMER_KEY, config.FS_CONSUMER_SECRET)
     try:
-        results = await asyncio.get_running_loop().run_in_executor(
-            None,
-            partial(fs.foods_search, query, page_number=page, max_results=max_results),
+        resp = fs.make_request(
+            "foods.search",
+            {
+                "search_expression": query,
+                "page_number": str(page),
+                "max_results": str(max_results),
+            },
         )
-    except (KeyError, TypeError):
-        log.warning("FatSecret search returned no results for: %s (page %d)", query, page)
+    except Exception:
         return []
-    if results is None:
+    foods = resp.get("foods", {})
+    food_list = foods.get("food", [])
+    if food_list is None:
         return []
-    if isinstance(results, dict):
-        return [results]
+    if isinstance(food_list, dict):
+        return [food_list]
+    return food_list
+
+
+async def search_food(query: str, page: int = 0, max_results: int = 50) -> list[dict]:
+    try:
+        results = await asyncio.get_running_loop().run_in_executor(
+            None, partial(_search_food_sync, query, page, max_results)
+        )
+    except Exception:
+        log.warning("FatSecret search failed for: %s (page %d)", query, page)
+        return []
     return results
 
 
-async def search_food_multi(queries: list[str]) -> list[dict]:
+def _clean_russian_query(name: str) -> str:
+    """Strip parenthetical parts and extra whitespace for better FatSecret search."""
+    import re
+    cleaned = re.sub(r"\s*\([^)]*\)", "", name).strip()
+    return cleaned if cleaned else name
+
+
+async def search_food_multi(queries: list[str], fallback_name: str = "") -> list[dict]:
     """Search multiple queries in parallel (50 results each), deduplicate by food_id."""
-    tasks = [search_food(q, page=0, max_results=50) for q in queries]
+    all_queries = list(queries)
+    if fallback_name:
+        cleaned = _clean_russian_query(fallback_name)
+        if cleaned not in all_queries:
+            all_queries.append(cleaned)
+
+    tasks = [search_food(q, page=0, max_results=50) for q in all_queries]
     all_results = await asyncio.gather(*tasks)
 
-    for q, results in zip(queries, all_results):
+    for q, results in zip(all_queries, all_results):
         log.info("FatSecret search '%s' → %d results", q, len(results))
 
     seen: set[str] = set()
@@ -89,7 +119,7 @@ async def search_food_multi(queries: list[str]) -> list[dict]:
             if fid not in seen:
                 seen.add(fid)
                 combined.append(item)
-    log.info("FatSecret combined: %d unique results from %d queries", len(combined), len(queries))
+    log.info("FatSecret combined: %d unique results from %d queries", len(combined), len(all_queries))
     return combined
 
 
@@ -207,11 +237,9 @@ async def match_food_top(
     Each result dict has: food_id, food_name, cal_per_100g, description, nutrition, food_type, score.
     """
     queries = [q for q in search_queries if q]
-    if fallback_name and fallback_name not in queries:
-        queries.append(fallback_name)
     if not queries:
         queries = [fallback_name]
-    results = await search_food_multi(queries)
+    results = await search_food_multi(queries, fallback_name=fallback_name)
     if not results:
         return []
 
