@@ -63,13 +63,12 @@ def _search_page_sync(
         fs = _get_client(session_token)
     else:
         fs = Fatsecret(config.FS_CONSUMER_KEY, config.FS_CONSUMER_SECRET)
+        log.warning("FatSecret client created without session token")
     params = {
         "method": "foods.search",
         "search_expression": query,
         "page_number": str(page),
         "max_results": "50",
-        "region": "RU",
-        "language": "ru",
         "format": "json",
     }
     response = fs.session.get(fs.api_url, params=params)
@@ -89,48 +88,37 @@ def _search_page_sync(
 
 
 async def search_food(
-    query: str, session_token: tuple[str, str] | None = None
+    query: str, session_token: tuple[str, str] | None = None, max_pages: int = 2
 ) -> list[dict]:
-    """Search FatSecret for a query (up to 50 results, region=RU)."""
-    try:
-        return await asyncio.get_running_loop().run_in_executor(
-            None, partial(_search_page_sync, query, 0, session_token)
-        )
-    except (KeyError, TypeError):
-        log.warning("FatSecret search returned no results for: %s", query)
-        return []
-    except Exception:
-        log.exception("FatSecret search failed for: %s", query)
-        return []
-
-
-def _clean_russian_query(name: str) -> str:
-    """Strip parenthetical parts and extra whitespace for better FatSecret search."""
-    import re
-    cleaned = re.sub(r"\s*\([^)]*\)", "", name).strip()
-    return cleaned if cleaned else name
+    """Search FatSecret for a query, fetching extra pages if the previous one was full."""
+    loop = asyncio.get_running_loop()
+    all_items: list[dict] = []
+    for page in range(max_pages):
+        try:
+            items = await loop.run_in_executor(
+                None, partial(_search_page_sync, query, page, session_token)
+            )
+        except (KeyError, TypeError):
+            log.warning("FatSecret search returned no results for: %s (page %d)", query, page)
+            break
+        except Exception:
+            log.exception("FatSecret search failed for: %s (page %d)", query, page)
+            break
+        all_items.extend(items)
+        if len(items) < 50:
+            break
+    return all_items
 
 
 async def search_food_multi(
     queries: list[str],
-    fallback_name: str = "",
     session_token: tuple[str, str] | None = None,
 ) -> list[dict]:
     """Search multiple queries in parallel, deduplicate by food_id."""
-    ru_query = ""
-    if fallback_name:
-        cleaned = _clean_russian_query(fallback_name)
-        if cleaned not in queries:
-            ru_query = cleaned
-
     tasks = [search_food(q, session_token=session_token) for q in queries]
-    if ru_query:
-        tasks.append(search_food(ru_query, session_token=session_token))
-
-    all_queries = list(queries) + ([ru_query] if ru_query else [])
     all_results = await asyncio.gather(*tasks)
 
-    for q, results in zip(all_queries, all_results):
+    for q, results in zip(queries, all_results):
         log.info("FatSecret search '%s' → %d results", q, len(results))
 
     seen: set[str] = set()
@@ -141,7 +129,7 @@ async def search_food_multi(
             if fid not in seen:
                 seen.add(fid)
                 combined.append(item)
-    log.info("FatSecret combined: %d unique results from %d queries", len(combined), len(all_queries))
+    log.info("FatSecret combined: %d unique results from %d queries", len(combined), len(queries))
     return combined
 
 
@@ -199,22 +187,14 @@ _NUTR_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-_NUTR_RU_RE = re.compile(
-    r"Кал:\s*([\d.]+)\s*ккал.*?"
-    r"Жир:\s*([\d.]+)\s*г.*?"
-    r"Углев:\s*([\d.]+)\s*г.*?"
-    r"Белк:\s*([\d.]+)\s*г",
-    re.IGNORECASE | re.DOTALL,
-)
-
 _SERVING_G_RE = re.compile(
-    r"(?:Per|На|В)\s+([\d.]+)\s*(?:g|г)",
+    r"Per\s+([\d.]+)\s*g",
     re.IGNORECASE,
 )
 
 
 def _parse_nutrition_from_desc(desc: str) -> tuple[dict[str, float], float] | None:
-    """Parse KBJU from food_description (English or Russian).
+    """Parse KBJU from food_description.
 
     Returns (nutrition_per_100g, serving_grams) or None if unparseable.
     Nutrition is always normalized to per-100g.
@@ -222,8 +202,6 @@ def _parse_nutrition_from_desc(desc: str) -> tuple[dict[str, float], float] | No
     if not desc:
         return None
     m = _NUTR_RE.search(desc)
-    if not m:
-        m = _NUTR_RU_RE.search(desc)
     if not m:
         return None
 
@@ -278,9 +256,7 @@ async def match_food_top(
     queries = [q for q in search_queries if q]
     if not queries:
         queries = [fallback_name]
-    results = await search_food_multi(
-        queries, fallback_name=fallback_name, session_token=session_token
-    )
+    results = await search_food_multi(queries, session_token=session_token)
     if not results:
         return []
 

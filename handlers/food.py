@@ -30,7 +30,6 @@ class FoodStates(StatesGroup):
 
 # ── Formatting helpers ────────────────────────────────────────────
 
-
 def _format_kbju(result: MealResult) -> str:
     lines = ["<b>Результат расчёта КБЖУ:</b>\n"]
     for i, item in enumerate(result.items, 1):
