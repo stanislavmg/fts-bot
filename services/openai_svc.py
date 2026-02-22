@@ -37,6 +37,7 @@ SYSTEM_PROMPT = """\
   "items": [
     {
       "name": "Название продукта",
+      "search_name": "product name in English",
       "weight_g": 200,
       "calories": 330,
       "protein": 62,
@@ -51,7 +52,8 @@ SYSTEM_PROMPT = """\
 }
 
 Totals — это сумма по всем items. Все числовые значения — float.
-Названия продуктов — на русском языке.\
+name — название на русском языке.
+search_name — название на английском для поиска в базе данных (например: "lentils", "cheddar cheese", "butter").\
 """
 
 

@@ -191,6 +191,7 @@ async def on_meal_type(callback: CallbackQuery, state: FSMContext) -> None:
                 name=item.name,
                 weight_g=item.weight_g,
                 meal=meal_type,
+                search_name=item.search_name,
             )
         except Exception:
             log.exception("Failed to log %s to FatSecret", item.name)

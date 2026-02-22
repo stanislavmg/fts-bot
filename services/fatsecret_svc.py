@@ -58,9 +58,13 @@ async def complete_auth(telegram_id: int, pin: str) -> tuple[str, str]:
 
 async def search_food(query: str) -> list[dict]:
     fs = Fatsecret(config.FS_CONSUMER_KEY, config.FS_CONSUMER_SECRET)
-    results = await asyncio.get_running_loop().run_in_executor(
-        None, partial(fs.foods_search, query)
-    )
+    try:
+        results = await asyncio.get_running_loop().run_in_executor(
+            None, partial(fs.foods_search, query)
+        )
+    except (KeyError, TypeError):
+        log.warning("FatSecret search returned no results for: %s", query)
+        return []
     if results is None:
         return []
     if isinstance(results, dict):
@@ -117,9 +121,13 @@ async def log_food_item(
     name: str,
     weight_g: float,
     meal: str = "other",
+    search_name: str = "",
 ) -> str | None:
     """Search for a food, pick the best match, and create a diary entry."""
-    results = await search_food(name)
+    query = search_name or name
+    results = await search_food(query)
+    if not results and search_name:
+        results = await search_food(name)
     if not results:
         return None
 
